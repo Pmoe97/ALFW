@@ -28,3 +28,7 @@ node proof.js
 ```
 
 It exercises the dispatch/subscribe channel, verifies the event log is append-only and immutable, shows reputation as a reweightable derived view, and confirms two runs from the same config produce identical logs.
+
+## License
+
+[MIT](LICENSE)
