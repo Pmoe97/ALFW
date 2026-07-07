@@ -253,4 +253,14 @@ for (const entity of [mira, rowan]) {
 }
 console.log('\nEntity-purity check PASSED: neither entity carries relationship data of its own');
 
+// --- 13. setFamilyTie writes both directions automatically -------------------
+relationships.setFamilyTie(mira.id, 'npc_mira_mother', 'child'); // Mira is her mother's child
+const childSide = relationships.getFamilyTie(mira.id, 'npc_mira_mother');
+const parentSide = relationships.getFamilyTie('npc_mira_mother', mira.id); // never set directly
+console.log(`\nfamily tie set once as ${mira.id}->npc_mira_mother = "${childSide.relation}"`);
+console.log(`reverse edge npc_mira_mother->${mira.id} auto-populated as "${parentSide.relation}"`);
+assert.equal(childSide.relation, 'child');
+assert.equal(parentSide.relation, 'parent');
+console.log('Auto-inverse check PASSED: the reverse family tie is queryable without a second setFamilyTie() call');
+
 console.log('\nALL CHECKS PASSED');

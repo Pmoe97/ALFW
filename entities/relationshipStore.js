@@ -44,10 +44,25 @@ function edgeKey(fromId, toId) {
   return `${fromId}->${toId}`;
 }
 
+// The logical inverse of each family relation, used to keep both directions
+// of a tie in sync from a single setFamilyTie() call. sibling/spouse/other
+// are symmetric; parent/child mirror each other.
+const INVERSE_RELATION = {
+  parent: 'child',
+  child: 'parent',
+  sibling: 'sibling',
+  spouse: 'spouse',
+  other: 'other',
+};
+
 export function createRelationshipStore(world) {
   const relationships = new Map();
   const familyTies = new Map();
 
+  // setFamilyTie() writes both directions, so getFamilyTie() is queryable
+  // from either side after a single call. setRelationship() stays
+  // one-directional — fromCallsTo is inherently asymmetric and must be set
+  // per side.
   function setRelationship(fromId, toId, stats, fromCallsTo) {
     relationships.set(edgeKey(fromId, toId), {
       fromId,
@@ -70,6 +85,7 @@ export function createRelationshipStore(world) {
 
   function setFamilyTie(fromId, toId, relation) {
     familyTies.set(edgeKey(fromId, toId), { fromId, toId, relation });
+    familyTies.set(edgeKey(toId, fromId), { fromId: toId, toId: fromId, relation: INVERSE_RELATION[relation] });
   }
 
   function getFamilyTie(fromId, toId) {
