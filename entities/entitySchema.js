@@ -1,0 +1,167 @@
+// entities/entitySchema.js — shared schema for Player and NPC.
+//
+// Both are built from the same EntityBase shape; factories are plain object
+// builders, no classes, matching the zero-framework style of the rest of
+// ALFW. Raw vs. derived discipline applies here too: everything under
+// `capabilities.skills` is an invested value. effectiveSkill() below is the
+// only way to read a skill's effective value — the bonus is never written
+// back onto the entity.
+
+/**
+ * @typedef {Object} IntimateSet
+ * @property {string} genitalType
+ * @property {string} shapeSize
+ * @property {string} extraDetails
+ */
+
+/**
+ * @typedef {Object} MemoryRef
+ * @property {number} seq - index into the world's event log this memory points at
+ * @property {string} summary
+ */
+
+/**
+ * @typedef {Object} ScheduleEntry
+ * @property {string} timeOfDay
+ * @property {string} locationId
+ * @property {string} activity
+ */
+
+/**
+ * @typedef {Object} Identity
+ * @property {string} firstName
+ * @property {string} lastName
+ * @property {number} age
+ * @property {string} birthday
+ * @property {string} gender
+ * @property {string} sexualOrientation
+ * @property {string} race
+ * @property {string} ethnicity
+ * @property {string} vocation
+ * @property {string} relationshipStatus
+ * @property {string} livingSituation
+ * @property {string} background
+ * @property {string} biography
+ */
+
+/**
+ * @typedef {Object} Appearance
+ * @property {string} heightBuild
+ * @property {{color: string, style: string, length: string, texture: string}} hair
+ * @property {{color: string, shape: string}} eyes
+ * @property {{shape: string, nose: string, lips: string, jawline: string, facialHair: string}} face
+ * @property {{tone: string, texture: string}} skin
+ * @property {{shape: string, chest: string, butt: string, legs: string}} body
+ * @property {string[]} distinguishingFeatures
+ * @property {IntimateSet[]} intimate
+ */
+
+/**
+ * @typedef {Object} Psychology
+ * @property {string[]} personalityTraits
+ * @property {Record<string, number>} personalityAxes
+ * @property {Record<string, number>} factionAlignmentAxes
+ * @property {string[]} hobbies
+ * @property {string[]} likes
+ * @property {string[]} dislikes
+ * @property {{accent: string, speechPattern: string, tags: string[]}} voice
+ * @property {MemoryRef[]} memories
+ * @property {{personality: string[], condition: string[], aiDirectives: string[]}} flags
+ */
+
+/**
+ * @typedef {'athletics'|'acrobatics'|'sleightOfHand'|'stealth'|'fortitude'|
+ *   'willpower'|'deception'|'intimidation'|'performance'|'persuasion'|
+ *   'magic'|'investigation'|'religion'|'history'|'perception'|'survival'|
+ *   'medicine'} PrimarySkill
+ */
+
+/**
+ * @typedef {'riding'|'dancing'|'swimming'|'cleaning'|'disguise'|'hands'|
+ *   'mouth'|'breasts'|'vagina'|'anus'} SecondarySkill
+ */
+
+/**
+ * @typedef {Object} Capabilities
+ * @property {{strength: number, agility: number, toughness: number, charisma: number, intelligence: number, insight: number}} attributes
+ * @property {{primary: Record<PrimarySkill, number>, secondary: Record<SecondarySkill, number>}} skills
+ */
+
+/**
+ * @typedef {Object} EntityBase
+ * @property {string} id
+ * @property {Identity} identity
+ * @property {Appearance} appearance
+ * @property {Psychology} psychology
+ * @property {Capabilities} capabilities
+ * @property {Array} inventory
+ */
+
+function buildEntityBase({ id, identity, appearance, psychology, capabilities, inventory = [] }) {
+  return { id, identity, appearance, psychology, capabilities, inventory };
+}
+
+/**
+ * @param {Object} data - EntityBase fields
+ * @returns {EntityBase & { playerData: Object }}
+ */
+export function createPlayer(data) {
+  return {
+    ...buildEntityBase(data),
+    // Placeholder for future player-only fields (quest log, discovered map).
+    // Intentionally empty — do not add speculative fields here.
+    playerData: {},
+  };
+}
+
+/**
+ * @param {Object} data - EntityBase fields plus `schedule`
+ * @returns {EntityBase & { schedule: ScheduleEntry[] }}
+ */
+export function createNpc({ schedule = [], ...base }) {
+  return {
+    ...buildEntityBase(base),
+    schedule,
+  };
+}
+
+// Which attribute backs each primary skill's effective-value bonus.
+// Provisional RPG-convention mapping — this is the only place it's defined,
+// adjust here if the pairing needs to change.
+const PRIMARY_SKILL_ATTRIBUTE = {
+  athletics: 'strength',
+  acrobatics: 'agility',
+  sleightOfHand: 'agility',
+  stealth: 'agility',
+  fortitude: 'toughness',
+  willpower: 'toughness',
+  deception: 'charisma',
+  intimidation: 'charisma',
+  performance: 'charisma',
+  persuasion: 'charisma',
+  magic: 'intelligence',
+  investigation: 'intelligence',
+  religion: 'intelligence',
+  history: 'intelligence',
+  perception: 'insight',
+  survival: 'insight',
+  medicine: 'insight',
+};
+
+/**
+ * Effective value of a primary skill = raw invested value +
+ * floor(backing attribute / 2). Secondary skills have no backing attribute
+ * and return the raw value unchanged. Never stored — call this wherever an
+ * effective value is needed instead of caching it on the entity.
+ */
+export function effectiveSkill(entity, skillName) {
+  const { skills, attributes } = entity.capabilities;
+  if (skillName in skills.primary) {
+    const attrName = PRIMARY_SKILL_ATTRIBUTE[skillName];
+    return skills.primary[skillName] + Math.floor(attributes[attrName] / 2);
+  }
+  if (skillName in skills.secondary) {
+    return skills.secondary[skillName];
+  }
+  throw new Error(`Unknown skill "${skillName}"`);
+}
