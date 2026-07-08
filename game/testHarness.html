@@ -3,6 +3,87 @@
 <head>
 <meta charset="utf-8">
 <title>ALFW Test Harness</title>
+<style>
+  /* Presentation-only: readability for a debug harness, not a product screen.
+     Dark bg / light text so this is legible during long test sessions. Each
+     panel gets its own accent color so "player action" vs "debug-only time
+     control" is distinguishable at a glance, not just by reading the text. */
+  :root {
+    --bg: #121212;
+    --panel: #1b1b1f;
+    --text: #e8e8e8;
+    --muted: #9aa0a6;
+    --border: #2c2c33;
+    --accent-clock: #4a90d9;
+    --accent-debug: #d9a441;
+    --accent-actions: #4ac97a;
+    --accent-relationship: #b083f0;
+    --accent-dialogue: #e85f5c;
+  }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 760px;
+    margin: 2rem auto;
+    padding: 0 1rem 3rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--muted); font-size: 0.85rem; margin-top: 0; margin-bottom: 1.5rem; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left-width: 4px;
+    border-radius: 6px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.25rem;
+  }
+  .panel h2 { margin-top: 0; margin-bottom: 0.5rem; font-size: 1.05rem; display: flex; align-items: center; gap: 0.5rem; }
+  .panel p, .panel small { color: var(--muted); }
+  .panel-clock { border-left-color: var(--accent-clock); }
+  .panel-debug { border-left-color: var(--accent-debug); }
+  .panel-actions { border-left-color: var(--accent-actions); }
+  .panel-relationship { border-left-color: var(--accent-relationship); }
+  .panel-dialogue { border-left-color: var(--accent-dialogue); }
+  .badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+  }
+  .badge-debug { background: rgba(217, 164, 65, 0.18); color: var(--accent-debug); border: 1px solid rgba(217, 164, 65, 0.4); }
+  .badge-actions { background: rgba(74, 201, 122, 0.18); color: var(--accent-actions); border: 1px solid rgba(74, 201, 122, 0.4); }
+  button {
+    background: #2a2a30;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.4rem 0.8rem;
+    margin: 0.15rem 0.3rem 0.15rem 0;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  button:hover { background: #35353c; }
+  #clock { font-size: 1.1rem; color: #fff; margin: 0.25rem 0; }
+  pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #111114;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.6rem 0.8rem;
+    font-size: 0.85rem;
+  }
+  table.tiers { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9rem; }
+  table.tiers td, table.tiers th { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+  table.tiers th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  input[type="text"] { background: #111114; border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 0.4rem 0.6rem; }
+  ul { margin: 0.25rem 0; padding-left: 1.25rem; }
+  li { margin: 0.15rem 0; }
+</style>
 </head>
 <body>
 <!--
@@ -19,30 +100,54 @@
   then open the printed localhost URL + /testHarness.html.
 -->
 <h1>ALFW Test Harness</h1>
+<p class="subtitle">Local-only dev tool — not part of the Perchance bundle.</p>
 
-<h2>World clock</h2>
-<pre id="clock">(starting…)</pre>
-<p>Debug context (dilation multiplier): idle &times;20, traveling &times;60, chatting &times;1</p>
-<button id="btn-ctx-idle">idle</button>
-<button id="btn-ctx-traveling">traveling</button>
-<button id="btn-ctx-chatting">chatting</button>
-<p><small>Backgrounding this tab pauses the clock (pause-on-blur). You can also call <code>debugSetContext('traveling')</code> in the console.</small></p>
+<div class="panel panel-clock">
+  <h2>World clock</h2>
+  <pre id="clock">(starting…)</pre>
+</div>
 
-<h2>Mira &rarr; Rowan relationship</h2>
-<div id="relationship"></div>
+<div class="panel panel-debug">
+  <h2>Debug time controls <span class="badge badge-debug">Debug only</span></h2>
+  <p>
+    Not a gameplay verb — dispatches a bare <code>timeContext</code> so the
+    tick source + dilation can be proven live before real travel/dialogue
+    verbs exist. Multipliers: idle &times;20, traveling &times;60, chatting &times;1.
+  </p>
+  <button id="btn-ctx-idle">idle</button>
+  <button id="btn-ctx-traveling">traveling</button>
+  <button id="btn-ctx-chatting">chatting</button>
+  <p><small>Backgrounding this tab pauses the clock (pause-on-blur). Also callable via <code>debugSetContext('traveling')</code> in the console.</small></p>
+</div>
 
-<h2>Mira's memories</h2>
-<div id="memories"></div>
+<div class="panel panel-actions">
+  <h2>Player actions <span class="badge badge-actions">Rowan acts on Mira</span></h2>
+  <button id="btn-help">Help Mira</button>
+  <button id="btn-rob">Rob Mira</button>
+  <button id="btn-ignore">Ignore Mira</button>
+</div>
 
-<h2>Actions (Rowan acts on Mira)</h2>
-<button id="btn-help">Help Mira</button>
-<button id="btn-rob">Rob Mira</button>
-<button id="btn-ignore">Ignore Mira</button>
+<div class="panel panel-relationship">
+  <h2>Mira &rarr; Rowan relationship</h2>
+  <div id="relationship"></div>
+</div>
 
-<h2>Talk to Mira</h2>
-<input id="player-input" type="text" size="60" placeholder="Say something to Mira...">
-<button id="btn-talk">Talk</button>
-<pre id="dialogue-output"></pre>
+<div class="panel panel-relationship">
+  <h2>Relationship tiers (live)</h2>
+  <div id="relationship-tiers"></div>
+</div>
+
+<div class="panel panel-relationship">
+  <h2>Mira's memories</h2>
+  <div id="memories"></div>
+</div>
+
+<div class="panel panel-dialogue">
+  <h2>Talk to Mira</h2>
+  <input id="player-input" type="text" size="60" placeholder="Say something to Mira...">
+  <button id="btn-talk">Talk</button>
+  <pre id="dialogue-output"></pre>
+</div>
 
 <!--
   worldState.js has an unconditional top-level `import { readFileSync } from

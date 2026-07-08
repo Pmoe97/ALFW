@@ -15,7 +15,7 @@ import { helpNpc, robNpc, ignoreNpc } from '../actions/playerActions.js';
 import { relationshipTier } from '../entities/relationshipStore.js';
 import { getDialogue } from '../ai/getDialogue.js';
 
-const { world, registry, relationships, mira, rowan } = buildSampleWorld();
+const { world, registry, relationships, mira, rowan, sable } = buildSampleWorld();
 createRelationshipEffectEngine(world, relationships);
 createMemoryEngine(world, registry);
 
@@ -27,10 +27,30 @@ const config = world.getState().config;
 const tick = createTickSource(world, config);
 
 const relationshipEl = document.getElementById('relationship');
+const relationshipTiersEl = document.getElementById('relationship-tiers');
 const memoriesEl = document.getElementById('memories');
 const dialogueOutputEl = document.getElementById('dialogue-output');
 const playerInputEl = document.getElementById('player-input');
 const clockEl = document.getElementById('clock');
+
+// Read-only tier readout for the entities currently in the scene. Pure
+// surfacing of what getRelationship()/relationshipTier() already compute —
+// no new derivation, no new dispatches.
+const TIER_PAIRS = [
+  { label: 'Rowan → Mira', fromId: rowan.id, toId: mira.id },
+  { label: 'Mira → Rowan', fromId: mira.id, toId: rowan.id },
+  { label: 'Mira → Sable', fromId: mira.id, toId: sable.id },
+  { label: 'Sable → Mira', fromId: sable.id, toId: mira.id },
+];
+
+function renderRelationshipTiers() {
+  const rowsHtml = TIER_PAIRS.map(({ label, fromId, toId }) => {
+    const edge = relationships.getRelationship(fromId, toId);
+    return `<tr><td>${label}</td><td>${relationshipTier(edge.stats)}</td></tr>`;
+  }).join('');
+  relationshipTiersEl.innerHTML =
+    `<table class="tiers"><thead><tr><th>Pair</th><th>Tier</th></tr></thead><tbody>${rowsHtml}</tbody></table>`;
+}
 
 function render() {
   const edge = relationships.getRelationship(mira.id, rowan.id);
@@ -43,6 +63,8 @@ function render() {
     .map((m) => `<li>[seq ${m.seq}] ${m.summary}</li>`)
     .join('');
   memoriesEl.innerHTML = `<ul>${memoriesHtml}</ul>`;
+
+  renderRelationshipTiers();
 }
 
 // --- World clock: live readout + debug context switch --------------------
