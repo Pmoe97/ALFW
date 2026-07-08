@@ -17,6 +17,10 @@ const WORLD_CONFIG = {
   worldName: 'Aldervale',
   startDateTime: '1024-03-01T06:00:00Z',
   rngSeed: 12345,
+  runtime: {
+    tickIntervalMs: 1000,
+    pauseOnBlur: true,
+  },
   timeDilation: {
     multipliers: {
       idle: 20,

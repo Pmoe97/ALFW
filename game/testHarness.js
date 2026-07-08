@@ -9,6 +9,8 @@
 import { buildSampleWorld } from './sampleWorld.js';
 import { createRelationshipEffectEngine } from '../engines/relationshipEffectEngine.js';
 import { createMemoryEngine } from '../engines/memoryEngine.js';
+import { createWorldClockEngine } from '../engines/worldClockEngine.js';
+import { createTickSource } from './tickSource.js';
 import { helpNpc, robNpc, ignoreNpc } from '../actions/playerActions.js';
 import { relationshipTier } from '../entities/relationshipStore.js';
 import { getDialogue } from '../ai/getDialogue.js';
@@ -17,10 +19,18 @@ const { world, registry, relationships, mira, rowan } = buildSampleWorld();
 createRelationshipEffectEngine(world, relationships);
 createMemoryEngine(world, registry);
 
+// World clock: created BEFORE the tick source starts so it catches every
+// CLOCK_TICK. It owns all game-time derivation; the tick source below only
+// dispatches ticks on an interval.
+const clock = createWorldClockEngine(world);
+const config = world.getState().config;
+const tick = createTickSource(world, config);
+
 const relationshipEl = document.getElementById('relationship');
 const memoriesEl = document.getElementById('memories');
 const dialogueOutputEl = document.getElementById('dialogue-output');
 const playerInputEl = document.getElementById('player-input');
+const clockEl = document.getElementById('clock');
 
 function render() {
   const edge = relationships.getRelationship(mira.id, rowan.id);
@@ -34,6 +44,54 @@ function render() {
     .join('');
   memoriesEl.innerHTML = `<ul>${memoriesHtml}</ul>`;
 }
+
+// --- World clock: live readout + debug context switch --------------------
+// Ugly-is-fine readout of the derived calendar date/time, updated on every
+// tick (and after a context switch). None of this is stored — it's all read
+// back out of the clock engine, which derives it from the event log.
+function twoDigit(n) {
+  return String(n).padStart(2, '0');
+}
+function renderClock() {
+  const d = clock.getCurrentDate();
+  const context = clock.getActiveTimeContext();
+  const total = clock.getTotalGameSeconds();
+  clockEl.textContent =
+    `Year ${d.year}, ${d.monthName}, Wk ${d.week}, Day ${d.day} — ` +
+    `${twoDigit(d.hour)}:${twoDigit(d.minute)}:${twoDigit(d.second)} ` +
+    `[${context}]  (${total} game-s total)`;
+}
+world.subscribe('CLOCK_TICK', renderClock);
+
+// Debug-only context switch. Real gameplay verbs (travel, dialogue) don't
+// exist yet, so this dispatches a bare, clearly-debug action carrying ONLY a
+// timeContext — enough to prove the tick source + dilation live without
+// pretending those verbs exist. WorldClockEngine already reads any action's
+// optional timeContext, so no engine change is needed.
+function debugSetContext(name) {
+  world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: name });
+  renderClock();
+}
+window.debugSetContext = debugSetContext; // also console-callable
+document.getElementById('btn-ctx-idle').addEventListener('click', () => debugSetContext('idle'));
+document.getElementById('btn-ctx-traveling').addEventListener('click', () => debugSetContext('traveling'));
+document.getElementById('btn-ctx-chatting').addEventListener('click', () => debugSetContext('chatting'));
+
+// Pause-on-blur (default, driven by config). When the tab is backgrounded the
+// tick source stops dispatching entirely, so game-time freezes instead of
+// accumulating while the player isn't looking. visibilitychange is the primary
+// signal; blur/focus are a fallback for browsers/timing that don't fire it.
+if (config.runtime?.pauseOnBlur) {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) tick.pause();
+    else tick.resume();
+  });
+  window.addEventListener('blur', () => tick.pause());
+  window.addEventListener('focus', () => tick.resume());
+}
+
+renderClock();
+tick.start();
 
 document.getElementById('btn-help').addEventListener('click', () => {
   helpNpc(world, rowan.id, mira.id);

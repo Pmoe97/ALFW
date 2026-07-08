@@ -35,6 +35,7 @@ import {
   deriveActiveTimeContext,
   deriveTotalGameSeconds,
 } from './engines/worldClockEngine.js';
+import { createTickSource } from './game/tickSource.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
 const NPC = 'npc_mira';
@@ -827,6 +828,103 @@ delete globalThis.generateText; // restore plugin-unavailable state for anything
 console.log('H5 done (manual read-through only, not a determinism-checked assertion)');
 
 console.log(`\nSection H PASSED: Sable Voss seeded with pre-existing, asymmetric NPC<->NPC history — both directions rebuildable and both legibly 'complicated'`);
+
+// =============================================================================
+// Section I: runtime tick SOURCE — the thing that turns the clock during live
+// play. WorldClockEngine (Section F) is proven; this proves the runtime piece
+// that feeds it. createTickSource dispatches CLOCK_TICK on a real interval in
+// the browser, but exposes simulateTicks(n) so the exact same dispatch path can
+// be driven deterministically here with no timer. The debug context switch
+// (DEBUG_SET_TIME_CONTEXT, a bare timeContext-carrying action) is what the test
+// harness uses to prove dilation live; it is exercised here too.
+//
+// NOT auto-tested: pause-on-blur. Pausing stops a real setInterval on a real
+// tab-visibility event — inherently timer/visibility driven, not reproducible
+// deterministically in Node without fake timers. It is eyeballed live in the
+// test harness instead (see the commit message).
+// =============================================================================
+console.log('\n=== Section I: runtime tick source (deterministic simulate-N-ticks) ===');
+
+function buildTickWorld() {
+  const w = initWorldState(CONFIG_PATH);
+  const c = createWorldClockEngine(w);
+  const t = createTickSource(w, w.getState().config);
+  return { world: w, clock: c, tick: t };
+}
+
+// --- I1: ticks under the default 'idle' context dilate by × 20 ---------------
+// tickIntervalMs is 1000 ⇒ 1 real-second per tick. 5 ticks × 1s × 20 = 100 game-s.
+const runtime = buildTickWorld();
+assert.equal(runtime.tick.realSecondsPerTick, 1, 'config runtime.tickIntervalMs 1000 ⇒ 1 real-s per tick');
+runtime.tick.simulateTicks(5);
+assert.equal(runtime.clock.getTotalGameSeconds(), 5 * 1 * 20, 'idle ticks must dilate by × 20');
+assert.deepEqual(
+  runtime.clock.getCurrentDate(),
+  { year: 1, monthIndex: 0, monthName: 'Rain', week: 1, day: 1, hour: 6, minute: 1, second: 40 },
+  'epoch 06:00 + 100 game-s ⇒ 06:01:40'
+);
+console.log(`I1 PASSED: 5 idle ticks → ${runtime.clock.getTotalGameSeconds()} game-s, ${JSON.stringify(runtime.clock.getCurrentDate())}`);
+
+// --- I2: the debug context switch drives dilation mid-stream -----------------
+// A bare DEBUG_SET_TIME_CONTEXT action (only a timeContext, no gameplay verb)
+// flips the active multiplier, exactly as the harness buttons do.
+const iBeforeTravel = runtime.clock.getTotalGameSeconds();
+runtime.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'traveling' });
+assert.equal(runtime.clock.getActiveTimeContext(), 'traveling', 'the debug switch must set the active context');
+runtime.tick.simulateTicks(5); // 5 real-s × 60
+assert.equal(runtime.clock.getTotalGameSeconds() - iBeforeTravel, 5 * 60, 'traveling ticks must use × 60');
+
+const iBeforeChat = runtime.clock.getTotalGameSeconds();
+runtime.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'chatting' });
+runtime.tick.simulateTicks(5); // 5 real-s × 1
+assert.equal(runtime.clock.getTotalGameSeconds() - iBeforeChat, 5 * 1, 'chatting ticks must use × 1');
+
+const iBeforeIdleAgain = runtime.clock.getTotalGameSeconds();
+runtime.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'idle' });
+runtime.tick.simulateTicks(5); // 5 real-s × 20
+assert.equal(runtime.clock.getTotalGameSeconds() - iBeforeIdleAgain, 5 * 20, 'switching back to idle must restore × 20');
+console.log('I2 PASSED: debug context switch drove × 60 (traveling), × 1 (chatting), × 20 (idle) mid-stream');
+
+// --- I3: the cache still equals a from-scratch rebuild after tick-driving -----
+assert.equal(
+  runtime.clock.rebuildTotalGameSeconds(),
+  runtime.clock.getTotalGameSeconds(),
+  'tick-driven total must remain fully rebuildable from the log alone'
+);
+console.log(`I3 PASSED: cached ${runtime.clock.getTotalGameSeconds()} == rebuilt-from-log ${runtime.clock.rebuildTotalGameSeconds()}`);
+
+// --- I4: determinism — identical tick/context sequence ⇒ identical log + date -
+const runtimeA = buildTickWorld();
+const runtimeB = buildTickWorld();
+function driveRuntime({ world: w, tick: t }) {
+  t.simulateTicks(3);
+  w.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'traveling' });
+  t.simulateTicks(4);
+  w.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'idle' });
+  t.simulateTicks(2);
+}
+driveRuntime(runtimeA);
+driveRuntime(runtimeB);
+assert.deepEqual(runtimeB.world.getEventLog(), runtimeA.world.getEventLog(), 'identical tick/context sequence ⇒ identical event log');
+assert.deepEqual(runtimeB.clock.getCurrentDate(), runtimeA.clock.getCurrentDate(), 'identical tick/context sequence ⇒ identical derived date');
+console.log(`I4 PASSED: determinism holds — identical sequence, identical log and date ${JSON.stringify(runtimeA.clock.getCurrentDate())}`);
+
+// --- I5: pause() latches and stops the source from starting ------------------
+// Deterministic slice of the pause contract we CAN check without a timer: once
+// paused, start() must not begin running. (The live "backgrounded tab freezes
+// game-time" behavior itself is eyeballed in the harness — see section header.)
+const paused = buildTickWorld();
+paused.tick.pause();
+assert.equal(paused.tick.isPaused, true, 'pause() must latch isPaused');
+paused.tick.start(); // must be a no-op while paused
+const totalWhilePaused = paused.clock.getTotalGameSeconds();
+assert.equal(totalWhilePaused, 0, 'no tick may have been dispatched while paused');
+paused.tick.resume();
+assert.equal(paused.tick.isPaused, false, 'resume() must clear the latch');
+paused.tick.stop(); // resume() started a real interval; clear it so Node exits cleanly
+console.log(`I5 PASSED: pause() latches and start() no-ops while paused (game-s held at ${totalWhilePaused}); real tab-blur pausing is eyeballed live`);
+
+console.log('\nSection I PASSED: the runtime tick source feeds CLOCK_TICKs into the proven clock; dilation switches, determinism, and rebuildability all hold');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
