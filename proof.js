@@ -748,6 +748,86 @@ console.log(`G6 PASSED: history ${JSON.stringify(g6History)} (4 events, Σ|weigh
 
 console.log('\nSection G PASSED: relationship stats are log-derived and rebuildable; divergent pairs read as complicated/resentful, ordinary pairs fall through');
 
+// =============================================================================
+// Section H: Sable Voss — an NPC<->NPC edge seeded with pre-existing,
+// asymmetric history (not built up from zero by later player actions, unlike
+// every other relationship proven above). Both directions land on the same
+// 'complicated' tier via two different stat shapes — the actual point of this
+// section: divergence-first tiering reads two different histories of the same
+// betrayal as the same legible label, without averaging either one away.
+// Uses a fresh buildSampleWorld() (Section E's pattern) to exercise the real
+// seeded edge rather than synthetic ids.
+// =============================================================================
+console.log('\n=== Section H: Sable Voss — NPC<->NPC edge with pre-existing, asymmetric history ===');
+
+const sampleH = buildSampleWorld();
+
+// --- H1: Mira -> Sable stats match the hand-authored seed exactly -----------
+const miraToSable = sampleH.relationships.getRelationship(sampleH.mira.id, sampleH.sable.id);
+assert.deepEqual(
+  miraToSable.stats,
+  { affection: 60, comfort: 24, trust: -40, desire: 0, obedience: 0 },
+  'Mira -> Sable must match the seeded deep-trust-wound shape exactly'
+);
+console.log(`H1 PASSED: Mira -> Sable stats = ${JSON.stringify(miraToSable.stats)}`);
+
+// --- H2: Sable -> Mira stats match the hand-authored seed exactly, and -------
+//         differ from H1's shape (the asymmetry is intentional, not a bug).
+const sableToMira = sampleH.relationships.getRelationship(sampleH.sable.id, sampleH.mira.id);
+assert.deepEqual(
+  sableToMira.stats,
+  { affection: 60, comfort: 20, trust: -10, desire: 0, obedience: 0 },
+  'Sable -> Mira must match the seeded shallower-trust-wound shape exactly'
+);
+assert.notDeepEqual(sableToMira.stats, miraToSable.stats, 'the two directions must NOT be symmetric — this is the intentional asymmetry');
+console.log(`H2 PASSED: Sable -> Mira stats = ${JSON.stringify(sableToMira.stats)} (deliberately asymmetric to H1)`);
+
+// --- H3: BOTH directions derive 'complicated' despite the different shapes --
+//         (load-bearing: two different paths into the same legible tier).
+const miraToSableTier = relationshipTier(miraToSable.stats);
+const sableToMiraTier = relationshipTier(sableToMira.stats);
+assert.equal(miraToSableTier, 'complicated', 'Mira -> Sable (trust -40) must read as complicated');
+assert.equal(sableToMiraTier, 'complicated', 'Sable -> Mira (trust -10) must read as complicated too, despite the shallower wound');
+console.log(`H3 PASSED: both directions read '${miraToSableTier}' / '${sableToMiraTier}' — same tier, two different histories`);
+
+// --- H4: rebuild-from-log-only equals the cache for both directions ---------
+assert.deepEqual(
+  sampleH.relationships.rebuildRelationshipStats(sampleH.mira.id, sampleH.sable.id),
+  miraToSable.stats,
+  'Mira -> Sable must be fully rebuildable from the log alone'
+);
+assert.deepEqual(
+  sampleH.relationships.rebuildRelationshipStats(sampleH.sable.id, sampleH.mira.id),
+  sableToMira.stats,
+  'Sable -> Mira must be fully rebuildable from the log alone'
+);
+console.log('H4 PASSED: both directions rebuild from the log alone identically to the cache');
+
+// --- H5: sanity read (NOT an automated assertion) ---------------------------
+// Proves the plumbing carries text through for a second NPC with her own
+// aiDirectives/voice; voice fluency and tonal contrast can only be judged by a
+// human, so this only logs the lines for a manual read-through, same spirit
+// as Section C's stubbed AI path. fallbackDialogue.js has no 'complicated'
+// tier lines yet (a pre-existing gap from the relationship-store redesign,
+// out of scope here), so this deliberately uses the stubbed generateText path
+// rather than the fallback path.
+console.log('\n--- H5: sanity read of stubbed dialogue for both sides (manual read-through only) ---');
+
+globalThis.generateText = async () =>
+  '{"dialogue": "Careful with that tone, or I\'ll start charging Mira interest on the gossip too.", "internalMonologue": "She always knows exactly when to bring up the books.", "toneTags": ["sly", "quick"]}';
+const sableLine = await getDialogue(sampleH.sable, sableToMira, sampleH.sable.psychology.memories, 'Rough night at the tables?');
+console.log(`Sable (re: Mira): "${sableLine.response.dialogue}"`);
+
+globalThis.generateText = async () =>
+  '{"dialogue": "Sable\'s the only one who remembers me before the tavern, so I let her keep her secrets. Mostly.", "internalMonologue": "I still know exactly to the coin what she took.", "toneTags": ["wry", "guarded"]}';
+const miraLine = await getDialogue(sampleH.mira, miraToSable, sampleH.mira.psychology.memories, 'You two go way back?');
+console.log(`Mira (re: Sable): "${miraLine.response.dialogue}"`);
+
+delete globalThis.generateText; // restore plugin-unavailable state for anything after this section
+console.log('H5 done (manual read-through only, not a determinism-checked assertion)');
+
+console.log(`\nSection H PASSED: Sable Voss seeded with pre-existing, asymmetric NPC<->NPC history — both directions rebuildable and both legibly 'complicated'`);
+
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
 // transport plumbing, and fallback + contract enforcement. Real live-AI

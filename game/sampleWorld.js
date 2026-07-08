@@ -1,7 +1,7 @@
 // game/sampleWorld.js — shared sample-world construction.
 //
 // Pure, silent construction (no console output) of the hand-authored
-// Mira/Rowan pair and their relationship, shared by game/main.js,
+// Mira/Rowan/Sable trio and their relationships, shared by game/main.js,
 // game/testHarness.js, and proof.js so none of them duplicate this data a
 // third time.
 
@@ -154,16 +154,88 @@ export function buildSampleWorld() {
     inventory: [],
   });
 
+  const sable = createNpc({
+    id: 'npc_sable', // proprietor of the Rusted Ledger, Mira's oldest friend and quietest grudge
+    identity: {
+      firstName: 'Sable',
+      lastName: 'Voss',
+      age: 35,
+      birthday: '1023-11-02',
+      gender: 'female',
+      sexualOrientation: 'bisexual',
+      race: 'human',
+      ethnicity: 'Aldervale dockside',
+      vocation: 'proprietor of the Rusted Ledger, a card-and-dice house',
+      relationshipStatus: 'single',
+      livingSituation: 'lives above the Rusted Ledger',
+      background: 'Opened the Rusted Ledger the same year Mira opened the Broken Wheel, on half of a stake the two of them inherited together from the dockside quarter they grew up in.',
+      biography: 'Sable and Mira grew up two doors apart in Aldervale\'s dockside quarter and split a small inheritance to start their businesses the same season. Three years in, during a bad stretch for Mira\'s tavern, Sable quietly moved half of the shared capital into the Ledger — legal, never discussed, and Mira learned of it from a bookkeeper rather than from Sable\'s own mouth. Sable has never said the word "sorry" about it out loud; instead she overpays her tab, over-helps, over-shows-up, in ways that read as unspoken penance. They still grab drinks most weeks. She is the only person left who remembers Mira from before anyone called her "the barkeep."',
+    },
+    appearance: {
+      heightBuild: 'tall, narrow-shouldered, holds herself like she is always about to leave',
+      hair: { color: 'black', style: 'sleek, pinned back', length: 'long', texture: 'straight' },
+      eyes: { color: 'dark brown', shape: 'sharp, hooded' },
+      face: { shape: 'angular', nose: 'straight', lips: 'thin, quick to smirk', jawline: 'sharp', facialHair: 'none' },
+      skin: { tone: 'deep olive', texture: 'smooth, carefully kept' },
+      body: { shape: 'lean', chest: 'small', butt: 'flat', legs: 'long' },
+      distinguishingFeatures: ['ink stains on two fingers she never quite scrubs off', 'dresses noticeably better than her dockside upbringing would suggest'],
+      intimate: [{ genitalType: 'vulva', shapeSize: 'petite', extraDetails: 'a small tattoo of a pair of dice on her hip' }],
+    },
+    psychology: {
+      personalityTraits: ['sharp-tongued', 'quick with a joke', 'evasive about money', 'genuinely warm underneath it'],
+      personalityAxes: { extraversion: 8, agreeableness: 5, conscientiousness: 6 },
+      factionAlignmentAxes: { crownLoyalty: -4, guildSympathy: 3 },
+      hobbies: ['cards', 'dice', 'counting other people\'s tells'],
+      likes: ['a good bluff', 'Mira\'s company', 'expensive fabric'],
+      dislikes: ['being asked about the books', 'silence at a card table', 'owing anyone anything'],
+      voice: {
+        accent: 'clipped Aldervale dockside patter, sanded smoother than it used to be',
+        speechPattern: 'fast, funny, always half a joke ahead of the conversation — the joke lands half a beat before she\'d be caught out on something, especially money',
+        tags: ['quick', 'sly', 'warm'],
+      },
+      memories: [], // no farm engine here (unlike proof.js), so nothing points at a real event-log entry
+      flags: {
+        personality: ['deflects with humor'],
+        condition: [],
+        aiDirectives: [
+          "When money, debts, or the Rusted Ledger's books come up, deflect with a joke rather than answering directly.",
+        ],
+      },
+    },
+    capabilities: {
+      attributes: { strength: 8, agility: 11, toughness: 9, charisma: 16, intelligence: 13, insight: 14 },
+      skills: {
+        primary: {
+          athletics: 1, acrobatics: 2, sleightOfHand: 7, stealth: 3, fortitude: 2,
+          willpower: 5, deception: 8, intimidation: 3, performance: 6, persuasion: 7,
+          magic: 0, investigation: 3, religion: 1, history: 2, perception: 6,
+          survival: 1, medicine: 1,
+        },
+        secondary: {
+          riding: 1, dancing: 3, swimming: 1, cleaning: 2, disguise: 3,
+          hands: 5, mouth: 3, breasts: 1, vagina: 2, anus: 1,
+        },
+      },
+    },
+    inventory: [],
+    schedule: [
+      { timeOfDay: 'morning', locationId: 'rusted_ledger', activity: 'squaring last night\'s books' },
+      { timeOfDay: 'evening', locationId: 'rusted_ledger', activity: 'running the tables' },
+      { timeOfDay: 'night', locationId: 'rusted_ledger_upstairs', activity: 'sleeping' },
+    ],
+  });
+
   const registry = createEntityRegistry(world);
   registry.register(mira);
   registry.register(rowan);
+  registry.register(sable);
 
   // createRelationshipStore subscribes to RELATIONSHIP_EVENT in its constructor,
   // so it must be built BEFORE the seed dispatches below (and before any engine
   // that dispatches relationship events) or the cache would miss these events.
   const relationships = createRelationshipStore(world);
 
-  // Seed the two starting edges. Stats are now log-derived, so the starting
+  // Seed the starting edges. Stats are now log-derived, so the starting
   // values are dispatched as RELATIONSHIP_EVENTs (one per non-zero axis); the
   // asymmetric fromCallsTo label is direct-set.
   function seedEdge(fromId, toId, stats, label) {
@@ -175,5 +247,13 @@ export function buildSampleWorld() {
   seedEdge(rowan.id, mira.id, { affection: 25, comfort: 20, trust: 15, desire: 10, obedience: 5 }, 'Mira');
   seedEdge(mira.id, rowan.id, { affection: 30, comfort: 25, trust: 20, desire: 10, obedience: 2 }, 'traveler');
 
-  return { world, registry, relationships, mira, rowan };
+  // Mira <-> Sable: old dockside friends with a real, unhealed betrayal over
+  // money. Both directions land on the 'complicated' tier (high affection,
+  // non-positive trust) but via deliberately different stat shapes — Mira's
+  // trust wound runs much deeper than Sable's. This asymmetry is intentional,
+  // not a bug: the two of them experienced the same history very differently.
+  seedEdge(mira.id, sable.id, { affection: 60, comfort: 24, trust: -40, desire: 0, obedience: 0 }, 'Sable');
+  seedEdge(sable.id, mira.id, { affection: 60, comfort: 20, trust: -10, desire: 0, obedience: 0 }, 'Mira');
+
+  return { world, registry, relationships, mira, rowan, sable };
 }
