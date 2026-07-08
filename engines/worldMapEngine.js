@@ -67,8 +67,10 @@ const CHANNEL_FACTION_TERRITORY = 97;
 // The settlement tier ladder, ascending. Index doubles as the base priority
 // rank (capital outranks city outranks town ...), and the names are the labels
 // a node's classification carries. Population/density is a separate future task;
-// this pass only assigns the label.
-const SETTLEMENT_TIERS = ['hamlet', 'village', 'town', 'city', 'capital'];
+// this pass only assigns the label. Exported so downstream layers (the POI
+// engine's tier-gated category tables) reuse this one ladder rather than
+// redefining it.
+export const SETTLEMENT_TIERS = ['hamlet', 'village', 'town', 'city', 'capital'];
 
 const DEG2RAD = Math.PI / 180;
 
@@ -93,8 +95,10 @@ function readClassification(config) {
 }
 
 // The map seed: an explicit worldMap.seed when set, else the main world seed —
-// matching the existing convention that rngSeed IS the world seed.
-function mapSeed(config) {
+// matching the existing convention that rngSeed IS the world seed. Exported so
+// the POI engine pins its baseline pool to the SAME world seed the terrain and
+// classification layers use, not a parallel seed source.
+export function mapSeed(config) {
   const wm = readWorldMap(config);
   return (wm.seed ?? config.rngSeed) | 0;
 }
@@ -102,8 +106,10 @@ function mapSeed(config) {
 // hashCoords — mix (seed, salt, integer lattice coords) into a 32-bit unsigned
 // int, deterministically and for negative coordinates too. This is only the
 // SEED for a fresh mulberry32 draw; the reused kernel PRNG does the actual
-// value production, so there is no second RNG algorithm here.
-function hashCoords(seed, salt, ix, iy) {
+// value production, so there is no second RNG algorithm here. Exported so the
+// POI engine seeds its own per-node lattice draws through this same primitive
+// rather than introducing a parallel hash.
+export function hashCoords(seed, salt, ix, iy) {
   let h = (seed | 0) ^ 0x9e3779b9;
   h = Math.imul(h ^ (salt | 0), 0x85ebca6b);
   h = Math.imul(h ^ (ix | 0), 0xc2b2ae35);
@@ -335,7 +341,10 @@ export function deriveBaselineFactionControl(config, x, y) {
 // by which node materialized first. That is what makes settlement placement
 // order-independent under lazy generation (the same move deriveTerrainAt made).
 
-const tierRank = (tier) => SETTLEMENT_TIERS.indexOf(tier);
+// tierRank — position on the ascending ladder (hamlet=0 … capital=4), −1 for a
+// non-tier. Exported alongside SETTLEMENT_TIERS so the POI engine can gate
+// category tables by minimum tier without duplicating the ladder.
+export const tierRank = (tier) => SETTLEMENT_TIERS.indexOf(tier);
 
 function cellOf(x, y, cellSize) {
   return { cx: Math.floor(x / cellSize), cy: Math.floor(y / cellSize) };
