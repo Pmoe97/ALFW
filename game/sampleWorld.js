@@ -26,6 +26,7 @@ const WORLD_CONFIG = {
       idle: 20,
       traveling: 60,
       chatting: 1,
+      exploring: 40,
     },
   },
   calendar: {
@@ -66,6 +67,39 @@ const WORLD_CONFIG = {
       },
       faction: { factionCount: 3, territoryNoiseScale: 300, uncontrolledThreshold: 0.25 },
       environment: { notabilityNoiseScale: 30, notabilityRarityExponent: 2.0, notabilityLandmarkThreshold: 0.6 },
+    },
+    poi: {
+      hiddenChance: 0.2,
+      settlement: {
+        poolSizeByTier: { hamlet: 2, village: 3, town: 5, city: 8, capital: 12 },
+        categories: {
+          shop: { weight: 4, minTier: 'hamlet' },
+          tavern: { weight: 3, minTier: 'hamlet' },
+          square: { weight: 2, minTier: 'village' },
+          temple: { weight: 2, minTier: 'town' },
+          guildhall: { weight: 2, minTier: 'town' },
+          keep: { weight: 1, minTier: 'city' },
+          palace: { weight: 1, minTier: 'capital' },
+        },
+      },
+      wilderness: {
+        base: 0,
+        notabilityPoolScale: 4,
+        hospitabilityPoolScale: 1,
+        maxPoolSize: 8,
+        categories: {
+          ore_deposit: { weight: 3, minNotability: 0 },
+          cave: { weight: 3, minNotability: 0 },
+          camp: { weight: 2, minNotability: 0 },
+          grove: { weight: 2, minNotability: 0 },
+          shrine: { weight: 1, minNotability: 0.5 },
+          ruin: { weight: 2, minNotability: 0.4 },
+          dungeon: { weight: 1, minNotability: 0.6 },
+        },
+      },
+      explore: {
+        baseExploreSuccessChance: 0.75,
+      },
     },
   },
 };

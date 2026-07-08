@@ -54,6 +54,12 @@ import {
   settlementSearchCellRadius,
 } from './engines/worldMapEngine.js';
 import { createFactionEngine, deriveFactionControl } from './engines/factionEngine.js';
+import {
+  createPoiEngine,
+  deriveBaselinePois,
+  deriveInjectedPois,
+  deriveBlindAttemptCount,
+} from './engines/poiEngine.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
@@ -1547,6 +1553,303 @@ assert.deepEqual(sectionLLinesA, sectionLLinesB, 'Section L output must be byte-
 console.log(`L7 PASSED: Section L produced identical output across two full runs (${sectionLLinesA.length} lines)`);
 
 console.log('\nSection L PASSED: classification is a pure function of (seed, coords) with order-independent settlement placement; faction control is a derived baseline overridden last-write-wins by the log and is rebuildable from it');
+
+// =============================================================================
+// Section M: POI engine — the discoverable content INSIDE a node.
+//
+// This layer reuses BOTH established disciplines at once. The BASELINE POOL is a
+// PURE function of (config, seed, node) — the deriveTerrainAt / deriveClassifica-
+// tionAt discipline — so the load-bearing property (M1, the K1/L1 analogue) is,
+// again, determinism BY POSITION not by exploration order or visit count, and the
+// pool is never re-rolled on a repeat visit. DISCOVERY, INJECTION, and REVEAL
+// AUTHORITY are events, so they take the log-replay + provably-redundant-cache
+// shape of the faction/relationship/clock engines; M6 (the L3/G5/L6 analogue) is
+// their rebuild-from-the-log proof. The blind roll is a FLAT success chance over
+// a finite, permanently-shrinking undiscovered set — there is deliberately no
+// diminishing-returns curve (M3). Exploring costs game-time purely by carrying
+// timeContext:'exploring', which the already-proven WorldClock picks up with zero
+// engine changes (M7). Uses the same createWorldState()/mapConfigWith() escape
+// hatch as Sections K/L, and synthetic hand-authored node classifications where a
+// specific tier/notability is needed for a controlled scenario.
+// =============================================================================
+console.log('\n=== Section M: POI engine (per-node points of interest) ===');
+
+function runSectionM(record) {
+  // Synthetic nodes with hand-authored classifications, so a scenario can pin an
+  // exact tier / notability without hunting the real graph for one. deriveBaseline-
+  // Pois is PURE over (config, node), so a synthetic node is a first-class input.
+  const synthSettlement = (tier, x, y) => ({
+    id: `syn_${tier}_${x}_${y}`,
+    x,
+    y,
+    classification: { kind: 'settlement', tier, settlementId: `syn_${tier}`, baselineFaction: null, notability: null, hospitability: null },
+  });
+  const synthWild = (notability, hospitability, x, y) => ({
+    id: `syn_wild_${x}_${y}`,
+    x,
+    y,
+    classification: { kind: 'wilderness', tier: null, settlementId: null, baselineFaction: null, notability, hospitability },
+  });
+
+  // The first accepted settlement site in a cell block, sorted by id (the L-section
+  // convention) for a stable, order-independent pick.
+  function firstAcceptedSite(cfg, R) {
+    const sites = [];
+    for (let cx = -R; cx <= R; cx++) {
+      for (let cy = -R; cy <= R; cy++) {
+        const s = isSettlementSiteAccepted(cfg, cx, cy);
+        if (s) sites.push(s);
+      }
+    }
+    sites.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return sites[0];
+  }
+
+  // A deterministic scan for a capital-tier synthetic node whose baseline pool is
+  // rich enough to exercise M2-M4: at least one hidden POI, at least one non-hidden
+  // POI, and >= 3 distinct categories. Folding the requirements into the scan keeps
+  // the later assertions robust (and still fully deterministic — same cfg ⇒ same
+  // node every run).
+  function findCapitalNode(cfg) {
+    for (let i = 0; i < 20000; i++) {
+      const x = (i % 140) * 3 + 1000;
+      const y = Math.floor(i / 140) * 3 + 1000;
+      const node = synthSettlement('capital', x, y);
+      const pool = deriveBaselinePois(cfg, node);
+      const hidden = pool.filter((p) => p.hidden);
+      const shown = pool.filter((p) => !p.hidden);
+      const distinct = new Set(pool.map((p) => p.category)).size;
+      if (hidden.length > 0 && shown.length > 0 && distinct >= 3) return { node, pool };
+    }
+    throw new Error('Section M: no suitable capital node found (config drift?)');
+  }
+
+  const cfg = mapConfigWith();
+  const capital = findCapitalNode(cfg);
+
+  // --- M1: baseline pool determinism BY POSITION (LOAD-BEARING, K1/L1 analogue) --
+  // A settlement's baseline pool (ids, categories, prominence, hidden) is byte-
+  // identical derived fresh, derived through a classification cache warmed by
+  // exploring unrelated regions in two DIFFERENT orders, and re-derived on a repeat
+  // "visit" — proving the pool is fixed by position, never re-rolled per visit.
+  {
+    const site = firstAcceptedSite(cfg, 12);
+    const node = deriveNodeAt(cfg, site.x, site.y);
+    assert.equal(node.classification.kind, 'settlement', 'the chosen accepted site must classify as a settlement');
+    const direct = deriveBaselinePois(cfg, node);
+    assert.ok(direct.length > 0, 'a settlement node must have a non-empty baseline pool');
+    assert.ok(direct.every((p) => p.id === `poi_${node.id}_b${direct.indexOf(p)}`), 'baseline ids are deterministic poi_<nodeId>_b<i>');
+
+    const engA = createWorldMapEngine(createWorldState(mapConfigWith()));
+    engA.classifyAt(600, -400); // warm the shared classification ctx with far cells
+    engA.classifyAt(-520, 310);
+    const clsA = engA.classifyAt(site.x, site.y);
+    const poolA = deriveBaselinePois(cfg, { id: nodeIdFor(site.x, site.y), x: site.x, y: site.y, classification: clsA });
+
+    const engB = createWorldMapEngine(createWorldState(mapConfigWith()));
+    engB.classifyAt(-900, 900); // a DIFFERENT warming order/region
+    engB.classifyAt(240, 770);
+    engB.classifyAt(-100, -880);
+    const clsB = engB.classifyAt(site.x, site.y);
+    const poolB = deriveBaselinePois(cfg, { id: nodeIdFor(site.x, site.y), x: site.x, y: site.y, classification: clsB });
+
+    assert.deepEqual(poolA, direct, 'pool via a differently-warmed cache must equal the fresh derivation');
+    assert.deepEqual(poolB, poolA, 'pool must be identical no matter how the cache was warmed');
+    assert.deepEqual(deriveBaselinePois(cfg, node), direct, 're-deriving on a repeat visit must yield the identical pool (never re-rolled)');
+    record(`M1 PASSED: settlement ${node.id} (${node.classification.tier}) baseline pool of ${direct.length} POIs is position-deterministic — identical fresh, via two differently-warmed caches, and on repeat visit`);
+  }
+
+  // --- M2: pool richness scales with classification --------------------------
+  // Higher settlement tier ⇒ larger pool AND richer category variety (tier-gated);
+  // a highly notable wilderness node is POI-rich; a hostile, mundane one is empty.
+  {
+    const poolSizes = cfg.worldMap.poi.settlement.poolSizeByTier;
+    const hamlet = deriveBaselinePois(cfg, synthSettlement('hamlet', 3000, 3000));
+    const capitalPool = capital.pool;
+    assert.equal(hamlet.length, poolSizes.hamlet, 'hamlet pool size equals its per-tier config lookup');
+    assert.equal(capitalPool.length, poolSizes.capital, 'capital pool size equals its per-tier config lookup');
+    assert.ok(capitalPool.length > hamlet.length, 'a capital pool must be larger than a hamlet pool');
+    for (const p of hamlet) {
+      assert.ok(['shop', 'tavern'].includes(p.category), `hamlet categories are tier-gated to shop/tavern (saw ${p.category})`);
+    }
+    const hamletDistinct = new Set(hamlet.map((p) => p.category)).size;
+    const capitalDistinct = new Set(capitalPool.map((p) => p.category)).size;
+    assert.ok(capitalDistinct > hamletDistinct, `a capital must offer richer category variety (${capitalDistinct} > ${hamletDistinct})`);
+
+    const richWild = deriveBaselinePois(cfg, synthWild(1.0, 0.8, 4000, 4000));
+    const barrenWild = deriveBaselinePois(cfg, synthWild(0.0, 0.0, 5000, 5000));
+    assert.ok(richWild.length > 0, 'a highly notable wilderness node must be POI-rich');
+    assert.equal(barrenWild.length, 0, 'a hostile, mundane wilderness node must yield an empty pool');
+    record(`M2 PASSED: hamlet ${hamlet.length} POIs (${hamletDistinct} categories) < capital ${capitalPool.length} POIs (${capitalDistinct} categories); notable wilderness ${richWild.length} POIs, barren wilderness ${barrenWild.length}`);
+  }
+
+  // --- M3: blind explore — flat chance, finite shrinking pool, bounded & det. --
+  // Repeated blind explores accumulate discoveries (non-hidden only); once the
+  // non-hidden pool is exhausted, blind explore returns null forever (bounded —
+  // can never exceed the finite pool, never re-rolls a found POI). attemptIndex is
+  // proven to be the pure log-derived count at every step. Hidden POIs never
+  // surface blindly. An identical sequence on a fresh world yields identical finds.
+  {
+    const node = capital.node;
+    const pool = capital.pool;
+    const nonHidden = pool.filter((p) => !p.hidden);
+    const hiddenIds = new Set(pool.filter((p) => p.hidden).map((p) => p.id));
+
+    const world = createWorldState(mapConfigWith());
+    const poi = createPoiEngine(world);
+
+    const discoveries = [];
+    let attempts = 0;
+    const CAP = 1000;
+    while (attempts < CAP && poi.getPoiState(node).undiscovered.some((p) => !p.hidden)) {
+      // attemptIndex is a PURE log replay, equal to the number of blind attempts
+      // so far — no engine-side counter is consulted.
+      assert.equal(deriveBlindAttemptCount(world.getEventLog(), node.id), attempts, 'attemptIndex must be the pure log-derived blind-attempt count');
+      const found = poi.exploreBlind(node);
+      if (found) discoveries.push(found);
+      attempts++;
+    }
+    assert.ok(attempts < CAP, 'blind exploration must exhaust the non-hidden pool well within the cap');
+
+    const discovered = poi.getPoiState(node).discovered;
+    for (const p of nonHidden) assert.ok(discovered.has(p.id), `every non-hidden POI must eventually be found blindly (missing ${p.id})`);
+    for (const id of hiddenIds) assert.ok(!discovered.has(id), `a hidden POI must never surface via blind exploration (leaked ${id})`);
+    assert.equal(discoveries.length, nonHidden.length, 'total blind discoveries cannot exceed the finite non-hidden pool');
+    assert.equal(poi.exploreBlind(node), null, 'blind explore on an exhausted non-hidden pool returns null (bounded)');
+    assert.equal(poi.exploreBlind(node), null, 'still null — the shrunken pool is never re-rollable');
+
+    // Determinism (E2 analogue): a fixed explore sequence on two fresh worlds.
+    function runBlind(n) {
+      const w = createWorldState(mapConfigWith());
+      const e = createPoiEngine(w);
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const f = e.exploreBlind(node);
+        if (f) out.push(f);
+      }
+      return out;
+    }
+    assert.deepEqual(runBlind(40), runBlind(40), 'an identical blind-explore sequence on a fresh world must yield identical discoveries');
+    record(`M3 PASSED: ${attempts} flat-chance attempts found all ${nonHidden.length} non-hidden POIs (0 of ${hiddenIds.size} hidden), then null forever; attemptIndex log-derived; sequence deterministic`);
+  }
+
+  // --- M4: directed explore + reveal authority -------------------------------
+  // Without authority a directed request for a hidden POI falls back to blind and
+  // cannot surface it; with authority it discovers exactly that hidden POI,
+  // bypassing the roll; a request for an id not in the pool is a safe blind
+  // fallback (never throws).
+  {
+    const node = capital.node;
+    const hidden = capital.pool.find((p) => p.hidden);
+
+    const w1 = createWorldState(mapConfigWith());
+    const poi1 = createPoiEngine(w1);
+    poi1.exploreDirected(node, hidden.id); // no authority ⇒ blind fallback
+    assert.ok(!poi1.getPoiState(node).discovered.has(hidden.id), 'directed WITHOUT authority must not surface a hidden POI');
+
+    const w2 = createWorldState(mapConfigWith());
+    const poi2 = createPoiEngine(w2);
+    poi2.grantRevealAuthority(hidden.id);
+    const got = poi2.exploreDirected(node, hidden.id);
+    assert.equal(got, hidden.id, 'directed WITH authority must discover exactly the requested hidden POI');
+    assert.ok(poi2.getPoiState(node).discovered.has(hidden.id), 'the authorized hidden POI is now discovered');
+
+    const w3 = createWorldState(mapConfigWith());
+    const poi3 = createPoiEngine(w3);
+    assert.doesNotThrow(() => poi3.exploreDirected(node, 'poi_does_not_exist'), 'directed for an id not in the pool must be a safe blind fallback, not a throw');
+    record(`M4 PASSED: hidden POI ${hidden.id} unreachable without authority, discovered directly (roll bypassed) with it; unknown-id directed request is a safe blind fallback`);
+  }
+
+  // --- M5: injection after generation ----------------------------------------
+  // injectPoi adds a POI to a node's pool even after it has been explored; it does
+  // NOT auto-surface (stays undiscovered until explored/directed); it is then
+  // discoverable; the injected pool is log-derived.
+  {
+    const node = synthSettlement('village', 6000, 6000);
+    const world = createWorldState(mapConfigWith());
+    const poi = createPoiEngine(world);
+    poi.exploreBlind(node); // visit BEFORE injecting, to prove post-visit injection works
+
+    const injected = poi.injectPoi(node.id, { id: 'poi_inj_lair', category: 'bandit_lair', prominence: 0.9, hidden: false, data: {} });
+    const state = poi.getPoiState(node);
+    assert.ok(state.pool.some((p) => p.id === 'poi_inj_lair'), 'an injected POI joins the node pool after generation');
+    assert.ok(state.undiscovered.some((p) => p.id === 'poi_inj_lair'), 'an injected POI is undiscovered — it does not auto-surface');
+    assert.ok(!state.discovered.has('poi_inj_lair'), 'an injected POI is not auto-discovered');
+    assert.equal(injected.source, 'injected', 'an injected stub is tagged source:injected');
+
+    poi.grantRevealAuthority('poi_inj_lair');
+    assert.equal(poi.exploreDirected(node, 'poi_inj_lair'), 'poi_inj_lair', 'the injected POI can then be discovered');
+    assert.deepEqual(poi.rebuildInjectedPois(node.id), [injected], 'the injected pool rebuilds from the log alone');
+    record(`M5 PASSED: POI injected into an already-visited node joined its pool, did not auto-surface, then was discoverable; injected pool log-derived`);
+  }
+
+  // --- M6: caches provably redundant (L3 / G5 / L6 analogue) ------------------
+  // After a mixed explore/inject/grant/directed sequence, each cache (discovered,
+  // injected, revealed) rebuilt from the log alone equals the incrementally-cached
+  // version.
+  {
+    const node = capital.node;
+    const world = createWorldState(mapConfigWith());
+    const poi = createPoiEngine(world);
+    poi.exploreBlind(node);
+    poi.exploreBlind(node);
+    poi.injectPoi(node.id, { id: 'poi_inj_cache', category: 'cache', prominence: 0.5, hidden: true, data: {} });
+    poi.grantRevealAuthority('poi_inj_cache');
+    poi.exploreDirected(node, 'poi_inj_cache');
+    poi.exploreBlind(node);
+
+    const state = poi.getPoiState(node);
+    const cachedDiscovered = [...state.discovered].sort();
+    const rebuiltDiscovered = [...poi.rebuildDiscoveredPoiIds(node)].sort();
+    assert.deepEqual(rebuiltDiscovered, cachedDiscovered, 'discovered set must rebuild from the log alone');
+
+    const cachedInjected = state.pool.filter((p) => p.source === 'injected');
+    assert.deepEqual(poi.rebuildInjectedPois(node.id), cachedInjected, 'injected pool must rebuild from the log alone');
+
+    const cachedRevealed = [...poi.getRevealedPoiIds()].sort();
+    const rebuiltRevealed = [...poi.rebuildRevealedPoiIds()].sort();
+    assert.deepEqual(rebuiltRevealed, cachedRevealed, 'reveal-authority set must rebuild from the log alone');
+    record(`M6 PASSED: discovered (${cachedDiscovered.length}), injected (${cachedInjected.length}), and revealed (${cachedRevealed.length}) caches all equal their from-log rebuilds`);
+  }
+
+  // --- M7: explore costs time via the 'exploring' timeContext (F2/I2 analogue) --
+  // An explore action carries timeContext:'exploring'; the already-proven WorldClock
+  // picks it up (no engine change) and subsequent ticks dilate by the exploring
+  // multiplier. Uses the shipped worldConfig.json (which now carries exploring).
+  {
+    const w = initWorldState(CONFIG_PATH);
+    const clock = createWorldClockEngine(w);
+    const poi = createPoiEngine(w);
+    const mult = w.getState().config.timeDilation.multipliers.exploring;
+    const node = synthSettlement('town', 7000, 7000);
+
+    assert.equal(clock.getActiveTimeContext(), 'idle', 'context starts at the default idle');
+    poi.exploreBlind(node);
+    assert.equal(clock.getActiveTimeContext(), 'exploring', 'an explore action must set the active context to exploring');
+    const before = clock.getTotalGameSeconds();
+    w.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
+    const added = clock.getTotalGameSeconds() - before;
+    assert.equal(added, 10 * mult, `a tick after exploring must dilate by the exploring multiplier (× ${mult})`);
+    assert.equal(clock.rebuildTotalGameSeconds(), clock.getTotalGameSeconds(), 'the exploring-dilated total must remain rebuildable from the log');
+    record(`M7 PASSED: explore set timeContext 'exploring'; a 10 real-s tick added ${added} game-s (× ${mult}) with no WorldClock change`);
+  }
+}
+
+// M1-M7, printed once.
+const sectionMLinesA = [];
+runSectionM((m) => {
+  sectionMLinesA.push(m);
+  console.log(m);
+});
+
+// --- M-final: determinism across full runs (K6/L7 analogue) ------------------
+// Run the entire section a second time and assert byte-identical output.
+const sectionMLinesB = [];
+runSectionM((m) => sectionMLinesB.push(m));
+assert.deepEqual(sectionMLinesA, sectionMLinesB, 'Section M output must be byte-identical across two full runs');
+console.log(`M-final PASSED: Section M produced identical output across two full runs (${sectionMLinesA.length} lines)`);
+
+console.log('\nSection M PASSED: baseline POIs are a pure function of (seed, node) with classification-scaled richness; discovery/injection/reveal are log-derived and rebuildable; blind explore is a flat-chance draw over a finite shrinking pool; directed explore honors reveal authority; exploring costs time via the exploring timeContext');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
