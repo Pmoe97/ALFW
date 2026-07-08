@@ -20,5 +20,24 @@
     "monthsPerYear": 4,
     "monthNames": ["Rain", "Sun", "Harvest", "Snow"],
     "epoch": { "year": 1, "month": "Rain", "week": 1, "day": 1, "hour": 6, "minute": 0, "second": 0 }
+  },
+  "worldMap": {
+    "seed": null,
+    "worldSize": 1.0,
+    "baseInterNodeDistance": 10,
+    "distanceJitter": 0.3,
+    "angleJitterDegrees": 15,
+    "reconciliationToleranceRadius": 4,
+    "terrain": {
+      "noiseScale": 40,
+      "octaves": 3,
+      "deepWaterLevel": 0.18,
+      "waterLevel": 0.32,
+      "cliffLevel": 0.82,
+      "hillsLevel": 0.65,
+      "forestMoisture": 0.6,
+      "denseForestMoisture": 0.88,
+      "falloffScale": 200
+    }
   }
 }

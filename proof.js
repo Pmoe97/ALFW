@@ -9,7 +9,7 @@
 // fallback + response contract (real AI only exists in a Perchance page).
 
 import assert from 'node:assert/strict';
-import { initWorldState } from './worldState.js';
+import { initWorldState, createWorldState } from './worldState.js';
 import { createFarmEngine } from './engines/farmEngine.js';
 import { createReputationEngine } from './engines/reputationEngine.js';
 import { createPlayer, createNpc, effectiveSkill } from './entities/entitySchema.js';
@@ -36,6 +36,14 @@ import {
   deriveTotalGameSeconds,
 } from './engines/worldClockEngine.js';
 import { createTickSource } from './game/tickSource.js';
+import {
+  createWorldMapEngine,
+  deriveTerrainAt,
+  generateNeighborCandidates,
+  computeHeading,
+  deriveNodeAt,
+  nodeIdFor,
+} from './engines/worldMapEngine.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
@@ -987,6 +995,238 @@ try {
 console.log('J3 PASSED: log() gates console.log on the channel toggle exactly as expected');
 
 console.log('\nSection J PASSED: console channels toggle independent of engine state; WorldClockEngine ships silenced by default');
+
+// =============================================================================
+// Section K: WorldMapEngine — procedural terrain/graph generation.
+//
+// The load-bearing property here is determinism BY POSITION, not by exploration
+// order: terrain at (x, y) is a pure function of (seed, coords), so lazy
+// materialization is provably equivalent to eager generation. Unlike the clock
+// and relationship engines, WorldMapEngine does NOT dispatch/subscribe — there
+// is no event history to replay, so these checks derive from config + coords
+// (deriveCalendarDate-style), never from the action log.
+//
+// Controlled scenarios build worlds directly with createWorldState() and custom
+// worldMap configs (zero-jitter, varied worldSize, tight world) — the same
+// escape hatch game/sampleWorld.js uses to run without a filesystem.
+// =============================================================================
+console.log('\n=== Section K: WorldMapEngine (coherent terrain + lazy converging graph) ===');
+
+// A mutable clone of the shipped config, plus helpers to derive variants with
+// worldMap/terrain overrides for the controlled scenarios below.
+const mapBaseConfig = initWorldState(CONFIG_PATH).getState().config;
+function mapConfigWith(worldMapOverrides = {}, terrainOverrides = {}) {
+  const cfg = structuredClone(mapBaseConfig);
+  cfg.worldMap = {
+    ...cfg.worldMap,
+    ...worldMapOverrides,
+    terrain: { ...cfg.worldMap.terrain, ...terrainOverrides },
+  };
+  return cfg;
+}
+function mapEngineWith(worldMapOverrides = {}, terrainOverrides = {}) {
+  const cfg = mapConfigWith(worldMapOverrides, terrainOverrides);
+  return { engine: createWorldMapEngine(createWorldState(cfg)), config: cfg };
+}
+const terrainOf = ({ elevation, moisture, terrainType, passable }) => ({
+  elevation,
+  moisture,
+  terrainType,
+  passable,
+});
+const stripEdges = ({ edges, ...rest }) => rest;
+const OPPOSITE = { N: 'S', S: 'N', E: 'W', W: 'E', NE: 'SW', SW: 'NE', NW: 'SE', SE: 'NW' };
+
+// runSectionK — the whole section body as a pure, self-contained routine that
+// emits every output line through `record`. Running it twice and comparing the
+// two line arrays (K6) is the "run the whole section twice, assert byte-
+// identical output" determinism check. Every engine it touches is built inside,
+// so nothing leaks between runs.
+function runSectionK(record) {
+  // --- K1: position-determinism, not order-determinism (LOAD-BEARING) --------
+  // Reach the same coordinate two ways — directly via deriveTerrainAt, and via a
+  // materialized chain — and, in a second engine, materialize an UNRELATED node
+  // first before reaching it. The terrain must be byte-identical every way,
+  // proving exploration order and prior materialization cannot change it.
+  {
+    const cfg = mapConfigWith();
+    const eng1 = createWorldMapEngine(createWorldState(cfg));
+    const origin = eng1.getOriginNode();
+    const ring1 = eng1.materializeNeighbors(origin.id).neighbors;
+    const nodeA = ring1[0];
+    const ring2 = eng1.materializeNeighbors(nodeA.id).neighbors;
+    // A second-ring node that is neither the origin nor A (a genuine chain end).
+    const nodeC = ring2.find((n) => n.id !== origin.id && n.id !== nodeA.id);
+    const { x: cx, y: cy } = nodeC;
+
+    const direct = terrainOf(deriveTerrainAt(cfg, cx, cy));
+    assert.deepEqual(terrainOf(nodeC), direct, 'chain-materialized terrain must equal direct derivation');
+
+    // Second engine: churn an unrelated branch (a different first-ring node and
+    // all its neighbors) BEFORE walking origin -> A -> C.
+    const eng2 = createWorldMapEngine(createWorldState(mapConfigWith()));
+    const origin2 = eng2.getOriginNode();
+    const ring1b = eng2.materializeNeighbors(origin2.id).neighbors;
+    const unrelated = ring1b[3];
+    eng2.materializeNeighbors(unrelated.id); // unrelated prior materialization
+    const nodeA2 = eng2.materializeNeighbors(origin2.id).neighbors[0];
+    const ring2b = eng2.materializeNeighbors(nodeA2.id).neighbors;
+    const nodeC2 = ring2b.find((n) => n.id !== origin2.id && n.id !== nodeA2.id);
+
+    assert.equal(nodeC2.id, nodeC.id, 'the same chain must reach the same coordinate/id regardless of order');
+    assert.deepEqual(terrainOf(nodeC2), direct, 'terrain must be identical despite unrelated prior materialization');
+    record(`K1 PASSED: terrain at (${cx.toFixed(3)}, ${cy.toFixed(3)}) is identical direct, via-chain, and after unrelated churn → ${direct.terrainType}`);
+  }
+
+  // --- K2: reconciliation + real reverse heading -----------------------------
+  // (a) Zero-jitter world: the East neighbor's West candidate lands exactly on
+  //     the origin, so it must reconcile to the existing origin (not duplicate).
+  // (b) The reverse edge heading must be computed from real coords.
+  // (c) computeHeading is genuinely coordinate-derived — for an off-axis
+  //     reconciled target it is NOT the naive opposite of the attempted heading.
+  {
+    const { engine } = mapEngineWith({ distanceJitter: 0, angleJitterDegrees: 0 });
+    const origin = engine.getOriginNode();
+    const res1 = engine.materializeNeighbors(origin.id);
+    const eastId = res1.edges.find((e) => e.heading === 'E').to;
+    const east = engine.getNode(eastId);
+
+    const res2 = engine.materializeNeighbors(east.id);
+    assert.ok(res2.reconciled >= 1, 'East\'s back-candidate must reconcile to an existing node, not duplicate');
+    // No duplicate node was created at the origin: the nearest node to the
+    // origin's own coordinate is still the origin itself. (The seed node sits at
+    // the nearest passable coordinate to (0,0), which need not be exactly (0,0).)
+    assert.equal(engine.getNodeAt(origin.x, origin.y).id, origin.id, 'reconciliation must connect to the existing origin, not spawn a twin');
+    // Bidirectional edge exists both ways.
+    assert.ok(origin.edges.some((e) => e.to === east.id), 'origin -> East edge must exist');
+    const backEdge = east.edges.find((e) => e.to === origin.id);
+    assert.ok(backEdge, 'East -> origin reverse edge must exist');
+    // (b) reverse heading equals computeHeading from the real coordinates.
+    assert.equal(
+      backEdge.heading,
+      computeHeading(east.x, east.y, origin.x, origin.y),
+      'reverse edge heading must be computed from the real relative coordinates'
+    );
+    assert.equal(backEdge.heading, 'W', 'East node due-west of origin must head back W');
+    record(`K2a PASSED: East's back-candidate reconciled to the existing origin (reconciled=${res2.reconciled}, no duplicate); reverse heading '${backEdge.heading}' from real coords`);
+
+    // (c) Pure isolation of the heading rule: an attempted 'E' edge whose
+    // reconciled target actually sits to the north-east. The reverse heading is
+    // 'SW' — the true opposite of the target's real bearing, and NOT 'W' (the
+    // naive opposite of the attempted direction). Proves reverse headings are
+    // never assumed-opposite.
+    assert.equal(computeHeading(0, 0, 6, 8), 'NE', 'bearing to (6,8) is NE');
+    const reverseReal = computeHeading(6, 8, 0, 0);
+    assert.equal(reverseReal, 'SW', 'reverse bearing from (6,8) is SW');
+    assert.notEqual(reverseReal, OPPOSITE['E'], 'real reverse heading must differ from the naive opposite of the attempted direction');
+    record(`K2c PASSED: off-axis reconciled target → reverse heading '${reverseReal}', NOT the assumed opposite '${OPPOSITE['E']}' of the attempted 'E'`);
+  }
+
+  // --- K3: passability falloff (STATISTICAL — note the different check style) -
+  // This is NOT an exact-equality assertion like the rest of the section: it is
+  // a statistical claim over many samples. At the same far radius, a larger
+  // worldSize (slower falloff) must yield a higher passable RATE than a smaller
+  // one. We sample a full ring of angles and compare aggregate rates.
+  {
+    const cfgSmall = mapConfigWith({ worldSize: 0.5 });
+    const cfgLarge = mapConfigWith({ worldSize: 3.0 });
+    const R = 300;
+    const SAMPLES = 360;
+    let passSmall = 0;
+    let passLarge = 0;
+    for (let i = 0; i < SAMPLES; i++) {
+      const a = (i / SAMPLES) * Math.PI * 2;
+      const x = R * Math.cos(a);
+      const y = R * Math.sin(a);
+      if (deriveTerrainAt(cfgSmall, x, y).passable) passSmall++;
+      if (deriveTerrainAt(cfgLarge, x, y).passable) passLarge++;
+    }
+    const rateSmall = passSmall / SAMPLES;
+    const rateLarge = passLarge / SAMPLES;
+    assert.ok(
+      rateLarge > rateSmall,
+      `larger worldSize must be more passable at radius ${R} (large ${rateLarge} vs small ${rateSmall})`
+    );
+    record(`K3 PASSED: at radius ${R}, passable rate large-world ${rateLarge.toFixed(3)} > small-world ${rateSmall.toFixed(3)} (${SAMPLES} samples, statistical)`);
+  }
+
+  // --- K4: impassable nodes still exist and are retrievable ------------------
+  // Walk outward in a tight world (fast falloff) until a materialized neighbor
+  // resolves to impassable terrain; it must still be stored and retrievable via
+  // getNode, just flagged passable:false.
+  {
+    const { engine } = mapEngineWith({ worldSize: 0.3 });
+    const visited = new Set();
+    let current = engine.getOriginNode();
+    visited.add(current.id);
+    let impassable = null;
+    for (let hop = 0; hop < 300 && !impassable; hop++) {
+      const res = engine.materializeNeighbors(current.id);
+      impassable = res.neighbors.find((n) => !n.passable) ?? null;
+      if (impassable) break;
+      // Step to the farthest-from-origin unvisited passable neighbor.
+      let next = null;
+      let nextDist = -1;
+      for (const n of res.neighbors) {
+        if (visited.has(n.id)) continue;
+        const d = Math.hypot(n.x, n.y);
+        if (d > nextDist) {
+          next = n;
+          nextDist = d;
+        }
+      }
+      if (!next) break;
+      visited.add(next.id);
+      current = next;
+    }
+    assert.ok(impassable, 'walking outward must eventually materialize an impassable node');
+    assert.equal(impassable.passable, false, 'the impassable node must be flagged passable:false');
+    const fetched = engine.getNode(impassable.id);
+    assert.ok(fetched, 'the impassable node must still be stored and retrievable via getNode');
+    assert.equal(fetched.passable, false, 'the retrieved impassable node is still passable:false');
+    record(`K4 PASSED: impassable '${fetched.terrainType}' node ${fetched.id} exists and is retrievable, flagged passable:false`);
+  }
+
+  // --- K5: cache rebuildability ----------------------------------------------
+  // rebuildNodeAt re-derives from scratch, ignoring the cache; its derivable
+  // fields must equal the cached node's (edges excluded — they are
+  // materialization state, not a property of the coordinate).
+  {
+    const cfg = mapConfigWith();
+    const engine = createWorldMapEngine(createWorldState(cfg));
+    const origin = engine.getOriginNode();
+    const node = engine.materializeNeighbors(origin.id).neighbors[0];
+    const rebuilt = engine.rebuildNodeAt(cfg, node.x, node.y);
+    assert.deepEqual(rebuilt, stripEdges(engine.getNode(node.id)), 'rebuilt-from-scratch node must equal the cached node');
+    assert.deepEqual(rebuilt, deriveNodeAt(cfg, node.x, node.y), 'rebuildNodeAt must equal the pure deriveNodeAt');
+    assert.equal(engine.getNodeAt(node.x, node.y).id, node.id, 'getNodeAt must find the cached node at its own coordinate');
+    assert.equal(rebuilt.id, nodeIdFor(node.x, node.y), 'node id must be the deterministic id-for-coordinate');
+    // The seed node itself must be passable AND still rebuildable — the nearest-
+    // passable-origin fix must not special-case the cache away from the pure
+    // derivation. (For the shipped seed, (0,0) rolls an impassable cliff, so the
+    // origin genuinely moves.)
+    assert.equal(origin.passable, true, 'the seeded origin node must be passable');
+    assert.deepEqual(engine.rebuildNodeAt(cfg, origin.x, origin.y), stripEdges(origin), 'the moved origin must still be rebuildable from scratch');
+    record(`K5 PASSED: cache is redundant — rebuildNodeAt matches getNode/getNodeAt for ${node.id}; origin (${origin.x.toFixed(3)}, ${origin.y.toFixed(3)}) is passable and rebuildable`);
+  }
+}
+
+// K1–K5, printed once.
+const sectionKLinesA = [];
+runSectionK((m) => {
+  sectionKLinesA.push(m);
+  console.log(m);
+});
+
+// --- K6: determinism across full runs --------------------------------------
+// Run the entire section a second time and assert the emitted output is byte-
+// identical to the first run.
+const sectionKLinesB = [];
+runSectionK((m) => sectionKLinesB.push(m));
+assert.deepEqual(sectionKLinesA, sectionKLinesB, 'Section K output must be byte-identical across two full runs');
+console.log(`K6 PASSED: Section K produced identical output across two full runs (${sectionKLinesA.length} lines)`);
+
+console.log('\nSection K PASSED: terrain is a pure function of (seed, coords); lazy generation reconciles into a converging graph, impassable nodes persist, and the cache is provably redundant');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
