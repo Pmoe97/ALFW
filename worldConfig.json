@@ -1,5 +1,20 @@
 {
   "worldName": "Aldervale",
   "startDateTime": "1024-03-01T06:00:00Z",
-  "rngSeed": 12345
+  "rngSeed": 12345,
+  "timeDilation": {
+    "multipliers": {
+      "idle": 20,
+      "traveling": 60,
+      "chatting": 1
+    }
+  },
+  "calendar": {
+    "secondsPerGameDay": 86400,
+    "daysPerWeek": 7,
+    "weeksPerMonth": 5,
+    "monthsPerYear": 4,
+    "monthNames": ["Rain", "Sun", "Harvest", "Snow"],
+    "epoch": { "year": 1, "month": "Rain", "week": 1, "day": 1, "hour": 6, "minute": 0, "second": 0 }
+  }
 }

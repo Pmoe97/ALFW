@@ -23,6 +23,12 @@ import { buildSampleWorld } from './game/sampleWorld.js';
 import { createRelationshipEffectEngine } from './engines/relationshipEffectEngine.js';
 import { createMemoryEngine } from './engines/memoryEngine.js';
 import { helpNpc, robNpc, ignoreNpc } from './actions/playerActions.js';
+import {
+  createWorldClockEngine,
+  deriveCalendarDate,
+  deriveActiveTimeContext,
+  deriveTotalGameSeconds,
+} from './engines/worldClockEngine.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
 const NPC = 'npc_mira';
@@ -568,6 +574,88 @@ console.log('E5 PASSED: unregistered target id is a defensive no-op, no crash');
 console.log('\nSection E PASSED: player verbs deterministically move relationship stats and auto-generate memories');
 
 assert.equal(unhandledRejections.length, 0, 'no unhandled rejection may have occurred anywhere');
+
+// =============================================================================
+// Section F: WorldClock — time is derived from the log, never a stored clock.
+// A dedicated world (initWorldState reads worldConfig.json, which now carries
+// timeDilation + calendar). CLOCK_TICK/CLOCK_JUMP are runtime/system actions,
+// dispatched directly here; the timeContext switch rides on an ordinary action.
+// =============================================================================
+console.log('\n=== Section F: WorldClock ===');
+
+const clockWorld = initWorldState(CONFIG_PATH);
+const clock = createWorldClockEngine(clockWorld);
+const clockConfig = clockWorld.getState().config; // frozen clone, incl. timeDilation + calendar
+
+// --- F1: continuous dilation under the default 'idle' context (× 20) ---------
+// Three ticks of 10 real-seconds each: 30 real-s × 20 = 600 game-s = 10 min.
+clockWorld.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
+clockWorld.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
+clockWorld.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
+assert.equal(clock.getTotalGameSeconds(), 30 * 20, 'idle ticks must dilate by the idle multiplier');
+assert.equal(clock.getActiveTimeContext(), 'idle', 'no timeContext set yet ⇒ default idle');
+assert.deepEqual(
+  clock.getCurrentDate(),
+  { year: 1, monthIndex: 0, monthName: 'Rain', week: 1, day: 1, hour: 6, minute: 10, second: 0 },
+  'epoch 06:00 + 600 game-seconds ⇒ 06:10:00 on Year 1, Rain, Week 1, Day 1'
+);
+console.log(`F1 PASSED: 30 real-s idle → ${clock.getTotalGameSeconds()} game-s, ${JSON.stringify(clock.getCurrentDate())}`);
+
+// --- F2: a timeContext-carrying action switches the multiplier mid-stream ----
+// Switch to 'traveling' (× 60), then two 30 real-second ticks: 60 real-s × 60
+// = 3600 game-s (one hour), NOT 60 × 20 = 1200.
+const beforeTravel = clock.getTotalGameSeconds();
+clockWorld.dispatch('ACTION_TRAVEL_STARTED', { timeContext: 'traveling' });
+assert.equal(clock.getActiveTimeContext(), 'traveling', 'the dispatched timeContext must become active');
+clockWorld.dispatch('CLOCK_TICK', { realSecondsElapsed: 30 });
+clockWorld.dispatch('CLOCK_TICK', { realSecondsElapsed: 30 });
+const travelAdded = clock.getTotalGameSeconds() - beforeTravel;
+assert.equal(travelAdded, 60 * 60, 'traveling ticks must use × 60, not the earlier × 20');
+assert.notEqual(travelAdded, 60 * 20, 'sanity: the multiplier really changed mid-stream');
+console.log(`F2 PASSED: 60 real-s traveling added ${travelAdded} game-s (× 60), total ${clock.getTotalGameSeconds()}`);
+
+// --- F3: a discrete jump adds a flat amount with no multiplier ---------------
+// One full game-day of sleep. Still under 'traveling', but a jump ignores it.
+const beforeJump = clock.getTotalGameSeconds();
+clockWorld.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 86400 });
+const jumpAdded = clock.getTotalGameSeconds() - beforeJump;
+assert.equal(jumpAdded, 86400, 'a jump must add exactly its flat game-seconds');
+assert.notEqual(jumpAdded, 86400 * 60, 'a jump must NOT pass through the active multiplier');
+console.log(`F3 PASSED: CLOCK_JUMP added exactly ${jumpAdded} game-s (flat, no × 60)`);
+
+// --- F4: the incremental cache equals a from-scratch rebuild -----------------
+assert.equal(
+  clock.rebuildTotalGameSeconds(),
+  clock.getTotalGameSeconds(),
+  'total rebuilt from the log alone must match the incrementally-cached total'
+);
+console.log(`F4 PASSED: cached total ${clock.getTotalGameSeconds()} == rebuilt-from-log ${clock.rebuildTotalGameSeconds()}`);
+
+// --- F5: changing a multiplier in config changes a full rebuild --------------
+// Same log, retuned traveling multiplier (60 → 120): the 60 traveling real-s
+// now yield 7200 instead of 3600. idle ticks (600) and the jump (86400) are
+// untouched, proving the multiplier is applied at derivation time, not baked
+// into stored log entries.
+const clockLog = clockWorld.getEventLog();
+const originalRebuild = deriveTotalGameSeconds(clockConfig, clockLog);
+const changedConfig = structuredClone(clockConfig);
+changedConfig.timeDilation.multipliers.traveling = 120;
+const changedRebuild = deriveTotalGameSeconds(changedConfig, clockLog);
+assert.notEqual(changedRebuild, originalRebuild, 'retuning a multiplier must change the rebuilt total');
+assert.equal(changedRebuild, 30 * 20 + 60 * 120 + 86400, 'rebuild must reflect the new multiplier exactly');
+console.log(`F5 PASSED: traveling × 60 → × 120 rebuilds ${originalRebuild} → ${changedRebuild} (config, not stored state)`);
+
+// --- F6: total game-seconds of 0 resolves to the epoch exactly ---------------
+assert.deepEqual(
+  deriveCalendarDate(clockConfig, 0),
+  { year: 1, monthIndex: 0, monthName: 'Rain', week: 1, day: 1, hour: 6, minute: 0, second: 0 },
+  'totalGameSeconds 0 must be Year 1, Rain, Week 1, Day 1, 06:00:00'
+);
+// And deriveActiveTimeContext over an empty log defaults to idle.
+assert.equal(deriveActiveTimeContext([]), 'idle', 'empty log ⇒ default idle context');
+console.log('F6 PASSED: totalGameSeconds 0 ⇒ Year 1, Rain, Week 1, Day 1, 06:00:00; empty log ⇒ idle');
+
+console.log('\nSection F PASSED: game-time is derived from the log — dilated ticks, flat jumps, rebuildable, config-driven');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
