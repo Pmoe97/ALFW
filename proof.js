@@ -43,7 +43,17 @@ import {
   computeHeading,
   deriveNodeAt,
   nodeIdFor,
+  deriveClassificationAt,
+  deriveHospitability,
+  deriveNotability,
+  deriveBaselineFactionControl,
+  deriveSettlementSiteInCell,
+  isSettlementSiteAccepted,
+  settlementSpacingOf,
+  maxSettlementSpacing,
+  settlementSearchCellRadius,
 } from './engines/worldMapEngine.js';
+import { createFactionEngine, deriveFactionControl } from './engines/factionEngine.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
@@ -1227,6 +1237,316 @@ assert.deepEqual(sectionKLinesA, sectionKLinesB, 'Section K output must be byte-
 console.log(`K6 PASSED: Section K produced identical output across two full runs (${sectionKLinesA.length} lines)`);
 
 console.log('\nSection K PASSED: terrain is a pure function of (seed, coords); lazy generation reconciles into a converging graph, impassable nodes persist, and the cache is provably redundant');
+
+// =============================================================================
+// Section L: WorldMapEngine node classification — settlements, faction control,
+// and environmental notability/hospitability.
+//
+// Classification is layered on top of Section K's terrain. Settlement placement,
+// tier, notability, and hospitability are PURE derived values (deriveTerrainAt
+// discipline): the load-bearing property, exactly as in K1, is determinism BY
+// POSITION not by exploration order — reaching a region different ways must not
+// change which nodes are settlements or at what tier. Min-spacing is enforced by
+// a pure priority-based Poisson-disk over a deterministic settlement lattice, so
+// it needs no arrival-ordered cache. Faction control is the ONE two-layer piece:
+// a derived baseline overridden by FACTION_CONTROL_CHANGED log events, replayed
+// last-write-wins exactly like deriveActiveTimeContext (Section F) and proved
+// rebuildable-from-the-log like relationship stats (Section G5).
+// =============================================================================
+console.log('\n=== Section L: WorldMapEngine node classification (settlements / faction / environment) ===');
+
+// A config variant helper for classification scenarios: clones the shipped
+// config and overrides worldMap.classification.settlement / .environment, the
+// same escape hatch mapConfigWith uses for terrain.
+function classConfigWith(settlementOverrides = {}, environmentOverrides = {}) {
+  const cfg = structuredClone(mapBaseConfig);
+  const c = cfg.worldMap.classification;
+  cfg.worldMap.classification = {
+    ...c,
+    settlement: { ...c.settlement, ...settlementOverrides },
+    faction: { ...c.faction },
+    environment: { ...c.environment, ...environmentOverrides },
+  };
+  return cfg;
+}
+
+function runSectionL(record) {
+  // Collect every ACCEPTED settlement site in a (2R+1)^2 block of cells, sorted
+  // by id for a stable, order-independent comparison value.
+  function collectAccepted(cfg, R, reverse = false) {
+    const out = [];
+    const xs = [];
+    for (let cx = -R; cx <= R; cx++) xs.push(cx);
+    if (reverse) xs.reverse();
+    for (const cx of xs) {
+      for (let dy = 0; dy <= 2 * R; dy++) {
+        const cy = reverse ? R - dy : -R + dy;
+        const site = isSettlementSiteAccepted(cfg, cx, cy);
+        if (site) out.push(site);
+      }
+    }
+    out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return out;
+  }
+  const acceptedKey = (list) => list.map((s) => `${s.id}:${s.tier}`);
+
+  // --- L1: settlement classification is order-independent (LOAD-BEARING) ------
+  // (a) The accepted-settlement SET is identical whether cells are scanned
+  //     forward or reversed. (b) A chosen settlement coordinate classifies
+  //     byte-identically via a fresh pure derivation and via two engines whose
+  //     shared classification caches were warmed by exploring UNRELATED regions
+  //     in different orders first.
+  {
+    const cfg = mapConfigWith();
+    const R = 12;
+    const forward = collectAccepted(cfg, R, false);
+    const reverse = collectAccepted(cfg, R, true);
+    assert.deepEqual(acceptedKey(reverse), acceptedKey(forward), 'accepted settlement set must be identical regardless of cell scan order');
+    assert.ok(forward.length > 0, 'the scanned region must contain at least one settlement');
+
+    const site = forward[0];
+    const direct = deriveClassificationAt(cfg, site.x, site.y);
+    assert.equal(direct.kind, 'settlement', 'a chosen accepted site must classify as a settlement');
+    assert.equal(direct.tier, site.tier, 'the node tier must match the accepted site tier');
+
+    const engA = createWorldMapEngine(createWorldState(mapConfigWith()));
+    engA.classifyAt(600, -400); // warm the shared ctx with far, unrelated cells
+    engA.classifyAt(-520, 310);
+    const viaA = engA.classifyAt(site.x, site.y);
+
+    const engB = createWorldMapEngine(createWorldState(mapConfigWith()));
+    engB.classifyAt(-900, 900); // a DIFFERENT warming order/region
+    engB.classifyAt(240, 770);
+    engB.classifyAt(-100, -880);
+    const viaB = engB.classifyAt(site.x, site.y);
+
+    assert.deepEqual(viaA, direct, 'classification via a warmed shared cache must equal the fresh derivation');
+    assert.deepEqual(viaB, viaA, 'classification must be identical no matter how the shared cache was warmed');
+    record(`L1 PASSED: ${forward.length} settlements in ${2 * R + 1}^2 cells, set is scan-order-independent; site ${site.id} classifies identically fresh + via two differently-warmed caches → ${direct.tier}`);
+  }
+
+  // --- L2: priority-based Poisson-disk spacing, incl. the CAPITAL-tier hazard --
+  // (a) Shipped config: no two accepted settlements are closer than their
+  //     tier-scaled spacing. (b) A suppressed-but-suitable candidate always has a
+  //     higher-priority accepted neighbor within range. (c) CAPITAL case: with a
+  //     config where every site is a capital, spacing is the widest tier value,
+  //     and suppression provably reaches BEYOND the base minSpacing — the exact
+  //     case a fixed base-minSpacing search window would miss.
+  {
+    const cfg = mapConfigWith();
+    const R = 16;
+    const acc = collectAccepted(cfg, R);
+    for (let i = 0; i < acc.length; i++) {
+      for (let j = i + 1; j < acc.length; j++) {
+        const a = acc[i];
+        const b = acc[j];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        const req = Math.max(settlementSpacingOf(cfg, a.tier), settlementSpacingOf(cfg, b.tier));
+        assert.ok(d >= req, `accepted settlements ${a.id}/${b.id} must be >= tier-scaled spacing apart (${d.toFixed(1)} >= ${req})`);
+      }
+    }
+
+    // A suppressed suitable candidate must have a strictly-higher-priority,
+    // itself-accepted neighbor within the shared spacing — i.e. suppression is
+    // never arbitrary. The suppressor is found by scanning the candidate's OWN
+    // searchCellRadius neighborhood (it may sit just outside the collected
+    // region), the same window the derivation uses.
+    const sr = settlementSearchCellRadius(cfg);
+    const higherPriority = (a, b) =>
+      settlementSpacingOf(cfg, a.tier) > settlementSpacingOf(cfg, b.tier) ||
+      (a.tier === b.tier && (a.suitability > b.suitability || (a.suitability === b.suitability && (a.cx < b.cx || (a.cx === b.cx && a.cy < b.cy)))));
+    let suppressedChecked = 0;
+    for (let cx = -R; cx <= R && suppressedChecked < 3; cx++) {
+      for (let cy = -R; cy <= R && suppressedChecked < 3; cy++) {
+        const cand = deriveSettlementSiteInCell(cfg, cx, cy);
+        if (!cand || isSettlementSiteAccepted(cfg, cx, cy)) continue; // suitable but suppressed
+        let suppressor = null;
+        for (let dx = -sr; dx <= sr && !suppressor; dx++) {
+          for (let dy = -sr; dy <= sr; dy++) {
+            const other = isSettlementSiteAccepted(cfg, cx + dx, cy + dy);
+            if (!other || !higherPriority(other, cand)) continue;
+            const d = Math.hypot(other.x - cand.x, other.y - cand.y);
+            const req = Math.max(settlementSpacingOf(cfg, other.tier), settlementSpacingOf(cfg, cand.tier));
+            if (d < req) { suppressor = other; break; }
+          }
+        }
+        assert.ok(suppressor, `suppressed suitable candidate settlement_${cx}_${cy} must have a higher-priority accepted neighbor within range`);
+        suppressedChecked++;
+      }
+    }
+    assert.ok(suppressedChecked > 0, 'the region must contain at least one suppressed suitable candidate to justify');
+
+    // (c) Capital-tier hazard: force every suitable site to capital tier.
+    const capCfg = classConfigWith({
+      tierThresholds: { hamlet: 0, village: 0, town: 0, city: 0, capital: 0 },
+    });
+    const capSpacing = settlementSpacingOf(capCfg, 'capital');
+    const baseMin = capCfg.worldMap.classification.settlement.minSpacing;
+    const cellSize = capCfg.worldMap.classification.settlement.cellSize;
+    assert.equal(capSpacing, maxSettlementSpacing(capCfg), 'capital spacing must be the max tier-scaled spacing');
+    const searchR = settlementSearchCellRadius(capCfg);
+    const naiveR = Math.ceil(baseMin / cellSize) + 1;
+    assert.equal(searchR, Math.ceil(capSpacing / cellSize) + 1, 'search radius must derive from capital spacing, not base minSpacing');
+    assert.ok(searchR > naiveR, `capital-derived search radius (${searchR}) must exceed a naive base-minSpacing window (${naiveR}) — the fixed-window bug`);
+
+    const capAcc = collectAccepted(capCfg, 6);
+    let longRangeSuppression = false;
+    for (let cx = -6; cx <= 6 && !longRangeSuppression; cx++) {
+      for (let cy = -6; cy <= 6 && !longRangeSuppression; cy++) {
+        const cand = deriveSettlementSiteInCell(capCfg, cx, cy);
+        if (!cand || isSettlementSiteAccepted(capCfg, cx, cy)) continue;
+        for (const a of capAcc) {
+          const d = Math.hypot(a.x - cand.x, a.y - cand.y);
+          if (d > baseMin && d < capSpacing) { longRangeSuppression = true; break; }
+        }
+      }
+    }
+    assert.ok(longRangeSuppression, 'a capital must suppress a suitable candidate that lies BEYOND base minSpacing but within capital spacing');
+    record(`L2 PASSED: ${acc.length} settlements all >= tier-scaled spacing; suppression justified by priority; capital search radius ${searchR} > naive ${naiveR}, suppression reaches beyond base minSpacing (${baseMin}) up to capital spacing (${capSpacing})`);
+  }
+
+  // --- L3: classification cache is provably redundant (K5-analogue) -----------
+  // Materialize nodes in an engine; a cached node's classification must equal
+  // both rebuildClassificationAt (fresh scan) and the pure deriveClassificationAt.
+  {
+    const cfg = mapConfigWith();
+    const engine = createWorldMapEngine(createWorldState(cfg));
+    const origin = engine.getOriginNode();
+    const ring = engine.materializeNeighbors(origin.id).neighbors;
+    const node = ring[2];
+    assert.ok(node.classification, 'a materialized node must carry a classification');
+    assert.deepEqual(node.classification, engine.rebuildClassificationAt(cfg, node.x, node.y), 'cached classification must equal a fresh-scan rebuild');
+    assert.deepEqual(node.classification, deriveClassificationAt(cfg, node.x, node.y), 'cached classification must equal the pure derivation');
+    assert.deepEqual(engine.rebuildNodeAt(cfg, node.x, node.y), stripEdges(engine.getNode(node.id)), 'the whole rebuilt node (terrain + classification) must equal the cached node');
+    record(`L3 PASSED: classification cache is redundant — cached == fresh rebuild == pure derivation for ${node.id} (${node.classification.kind})`);
+  }
+
+  // --- L4: notability is sparse and coherent (STATISTICAL, K3-analogue) -------
+  // High notability must be rare (a small fraction above the landmark threshold)
+  // yet present (landmarks exist), and coherent: nearby coordinates differ less
+  // than far-apart ones — i.e. it is coherent noise, not a uniform per-node roll.
+  {
+    const cfg = mapConfigWith();
+    const env = cfg.worldMap.classification.environment;
+    let above = 0;
+    let total = 0;
+    let maxN = 0;
+    for (let i = 0; i < 6400; i++) {
+      const x = (i % 80) * 6 - 240;
+      const y = Math.floor(i / 80) * 6 - 240;
+      const n = deriveNotability(cfg, x, y);
+      if (n > env.notabilityLandmarkThreshold) above++;
+      if (n > maxN) maxN = n;
+      total++;
+    }
+    const frac = above / total;
+    assert.ok(frac > 0 && frac < 0.15, `landmarks must be rare-but-present (fraction above threshold ${frac.toFixed(4)} in (0, 0.15))`);
+    assert.ok(maxN > env.notabilityLandmarkThreshold, 'at least one sampled node must exceed the landmark threshold');
+
+    // Coherence: mean |Δnotability| for near pairs < for far pairs.
+    let nearSum = 0;
+    let farSum = 0;
+    const PAIRS = 300;
+    for (let i = 0; i < PAIRS; i++) {
+      const x = (i * 13) % 500 - 250;
+      const y = (i * 29) % 500 - 250;
+      nearSum += Math.abs(deriveNotability(cfg, x, y) - deriveNotability(cfg, x + 2, y + 2));
+      farSum += Math.abs(deriveNotability(cfg, x, y) - deriveNotability(cfg, x + 137, y + 211));
+    }
+    assert.ok(nearSum / PAIRS < farSum / PAIRS, `notability must be coherent: near-pair delta (${(nearSum / PAIRS).toFixed(4)}) < far-pair delta (${(farSum / PAIRS).toFixed(4)})`);
+    record(`L4 PASSED: notability sparse (${(frac * 100).toFixed(2)}% landmarks, max ${maxN.toFixed(3)}) and coherent (near Δ ${(nearSum / PAIRS).toFixed(4)} < far Δ ${(farSum / PAIRS).toFixed(4)})`);
+  }
+
+  // --- L5: hospitability is the single suitability source ---------------------
+  // The scalar a wilderness node carries is exactly deriveHospitability at its
+  // coordinate, and it is the SAME scalar that gated settlement placement
+  // (a settlement site's hospitability clears the suitability threshold). It also
+  // tracks terrain: pastoral high, hostile low.
+  {
+    const cfg = mapConfigWith();
+    const s = cfg.worldMap.classification.settlement;
+    const site = collectAccepted(cfg, 12)[0];
+    assert.ok(deriveHospitability(cfg, site.x, site.y) >= s.suitabilityThreshold, 'a placed settlement site must clear the suitability threshold (same scalar)');
+
+    // A wilderness node exposes hospitability == deriveHospitability, notability set.
+    let wild = null;
+    for (let i = 0; i < 2000 && !wild; i++) {
+      const x = (i % 40) * 7 - 140;
+      const y = Math.floor(i / 40) * 7 - 175;
+      const c = deriveClassificationAt(cfg, x, y);
+      if (c.kind === 'wilderness') wild = { x, y, c };
+    }
+    assert.ok(wild, 'the region must contain a wilderness node');
+    assert.equal(wild.c.hospitability, deriveHospitability(cfg, wild.x, wild.y), 'wilderness hospitability must equal deriveHospitability (single source)');
+    assert.equal(wild.c.tier, null, 'a wilderness node has no settlement tier');
+    assert.ok(typeof wild.c.notability === 'number', 'a wilderness node carries a notability scalar');
+
+    // Terrain correlation: hostile deep-water/cliff is less hospitable than a
+    // pastoral plains/shore coordinate somewhere in the region.
+    let hostileMin = 1;
+    let benignMax = 0;
+    for (let i = 0; i < 3000; i++) {
+      const x = (i % 60) * 8 - 240;
+      const y = Math.floor(i / 60) * 8 - 200;
+      const tt = deriveTerrainAt(cfg, x, y).terrainType;
+      const h = deriveHospitability(cfg, x, y);
+      if (tt === 'deep_water' || tt === 'cliff') hostileMin = Math.min(hostileMin, h);
+      if (tt === 'plains' || tt === 'shore') benignMax = Math.max(benignMax, h);
+    }
+    assert.ok(benignMax > hostileMin, `pastoral terrain must reach higher hospitability than hostile terrain (${benignMax.toFixed(3)} > ${hostileMin.toFixed(3)})`);
+    record(`L5 PASSED: hospitability is one source — settlement gate uses it, wilderness reuses it; pastoral ${benignMax.toFixed(3)} > hostile ${hostileMin.toFixed(3)}`);
+  }
+
+  // --- L6: faction control = derived baseline + log override (G5-analogue) ----
+  // Baseline is pure/position-deterministic. FACTION_CONTROL_CHANGED events
+  // override it last-write-wins (null is a real value: "taken to uncontrolled"),
+  // a never-overridden settlement returns its baseline, and getFactionControl is
+  // always rebuildable from the log alone.
+  {
+    const cfg = mapConfigWith();
+    const site = collectAccepted(cfg, 12)[0];
+    const classification = deriveClassificationAt(cfg, site.x, site.y);
+    const node = { id: 'l6_node', x: site.x, y: site.y, classification };
+    const baseline = classification.baselineFaction;
+
+    // Baseline is pure + derived at the site.
+    assert.equal(deriveBaselineFactionControl(cfg, site.x, site.y), deriveBaselineFactionControl(cfg, site.x, site.y), 'baseline faction must be deterministic');
+    assert.equal(classification.baselineFaction, deriveBaselineFactionControl(cfg, site.x, site.y), 'a settlement carries the baseline faction derived at its site');
+
+    const world = createWorldState(mapConfigWith());
+    const factions = createFactionEngine(world); // built BEFORE any dispatch
+
+    // A never-overridden settlement returns its baseline.
+    assert.equal(factions.getFactionControl(node), baseline ?? null, 'an un-overridden settlement returns its derived baseline');
+    assert.equal(factions.rebuildFactionControl(node), baseline ?? null, 'rebuild of an un-overridden settlement equals the baseline');
+
+    // Override sequence, asserting last-write-wins + rebuild equality each step.
+    const steps = ['faction_2', null, 'faction_0'];
+    for (const target of steps) {
+      factions.setFactionControl(node.classification.settlementId, target);
+      assert.equal(factions.getFactionControl(node), target, `getFactionControl must reflect the latest FACTION_CONTROL_CHANGED (${String(target)})`);
+      assert.equal(factions.rebuildFactionControl(node), factions.getFactionControl(node), 'rebuilt-from-log control must equal the cached control');
+      assert.equal(deriveFactionControl(world.getEventLog(), node.classification.settlementId, baseline), target, 'pure deriveFactionControl must agree with the cache');
+    }
+    record(`L6 PASSED: faction baseline (${String(baseline)}) overridden last-write-wins → ${String(steps[steps.length - 1])}; rebuild-from-log matches at every step`);
+  }
+}
+
+// L1–L6, printed once.
+const sectionLLinesA = [];
+runSectionL((m) => {
+  sectionLLinesA.push(m);
+  console.log(m);
+});
+
+// --- L7: determinism across full runs (K6-analogue) --------------------------
+// Run the entire section a second time and assert byte-identical output.
+const sectionLLinesB = [];
+runSectionL((m) => sectionLLinesB.push(m));
+assert.deepEqual(sectionLLinesA, sectionLLinesB, 'Section L output must be byte-identical across two full runs');
+console.log(`L7 PASSED: Section L produced identical output across two full runs (${sectionLLinesA.length} lines)`);
+
+console.log('\nSection L PASSED: classification is a pure function of (seed, coords) with order-independent settlement placement; faction control is a derived baseline overridden last-write-wins by the log and is rebuildable from it');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
