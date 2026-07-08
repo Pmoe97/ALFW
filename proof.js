@@ -1093,9 +1093,10 @@ function runSectionK(record) {
 
     const res2 = engine.materializeNeighbors(east.id);
     assert.ok(res2.reconciled >= 1, 'East\'s back-candidate must reconcile to an existing node, not duplicate');
-    // No duplicate node was created at the origin: the nearest node to (0,0) is
-    // still the origin itself.
-    assert.equal(engine.getNodeAt(0, 0).id, origin.id, 'reconciliation must connect to the existing origin, not spawn a twin');
+    // No duplicate node was created at the origin: the nearest node to the
+    // origin's own coordinate is still the origin itself. (The seed node sits at
+    // the nearest passable coordinate to (0,0), which need not be exactly (0,0).)
+    assert.equal(engine.getNodeAt(origin.x, origin.y).id, origin.id, 'reconciliation must connect to the existing origin, not spawn a twin');
     // Bidirectional edge exists both ways.
     assert.ok(origin.edges.some((e) => e.to === east.id), 'origin -> East edge must exist');
     const backEdge = east.edges.find((e) => e.to === origin.id);
@@ -1200,7 +1201,13 @@ function runSectionK(record) {
     assert.deepEqual(rebuilt, deriveNodeAt(cfg, node.x, node.y), 'rebuildNodeAt must equal the pure deriveNodeAt');
     assert.equal(engine.getNodeAt(node.x, node.y).id, node.id, 'getNodeAt must find the cached node at its own coordinate');
     assert.equal(rebuilt.id, nodeIdFor(node.x, node.y), 'node id must be the deterministic id-for-coordinate');
-    record(`K5 PASSED: cache is redundant — rebuildNodeAt matches getNode/getNodeAt for ${node.id}`);
+    // The seed node itself must be passable AND still rebuildable — the nearest-
+    // passable-origin fix must not special-case the cache away from the pure
+    // derivation. (For the shipped seed, (0,0) rolls an impassable cliff, so the
+    // origin genuinely moves.)
+    assert.equal(origin.passable, true, 'the seeded origin node must be passable');
+    assert.deepEqual(engine.rebuildNodeAt(cfg, origin.x, origin.y), stripEdges(origin), 'the moved origin must still be rebuildable from scratch');
+    record(`K5 PASSED: cache is redundant — rebuildNodeAt matches getNode/getNodeAt for ${node.id}; origin (${origin.x.toFixed(3)}, ${origin.y.toFixed(3)}) is passable and rebuildable`);
   }
 }
 

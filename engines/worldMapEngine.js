@@ -269,10 +269,41 @@ export function deriveNodeAt(config, x, y) {
   return { id: nodeIdFor(x, y), x, y, ...deriveTerrainAt(config, x, y) };
 }
 
+// findPassableOrigin — PURE. The seed node the whole graph grows from must not
+// itself be impassable (terrain at (0,0) is just whatever the noise field rolls
+// — for some seeds a cliff or deep water). This deterministically spirals
+// outward from (0,0) and returns the nearest coordinate whose terrain is
+// passable. Only the seed node's POSITION moves; falloff is still measured from
+// (0,0), and terrain stays a pure function of coordinates, so the origin node
+// remains fully rebuildable (deriveNodeAt at this coordinate matches the cache).
+// The scan (fixed radial step + angular resolution) is itself deterministic, so
+// the chosen origin is reproducible from (seed, config) alone.
+const ORIGIN_SEARCH_STEP = 1;
+const ORIGIN_SEARCH_ANGLES = 12;
+const ORIGIN_SEARCH_MAX_RADIUS = 10000;
+function findPassableOrigin(config) {
+  if (deriveTerrainAt(config, 0, 0).passable) return { x: 0, y: 0 };
+  for (
+    let radius = ORIGIN_SEARCH_STEP;
+    radius <= ORIGIN_SEARCH_MAX_RADIUS;
+    radius += ORIGIN_SEARCH_STEP
+  ) {
+    for (let a = 0; a < ORIGIN_SEARCH_ANGLES; a++) {
+      const ang = (a / ORIGIN_SEARCH_ANGLES) * Math.PI * 2;
+      const x = radius * Math.cos(ang);
+      const y = radius * Math.sin(ang);
+      if (deriveTerrainAt(config, x, y).passable) return { x, y };
+    }
+  }
+  // Unreachable near the origin (falloff ~0 there ⇒ mostly-passable base
+  // terrain); fall back to (0,0) rather than throw.
+  return { x: 0, y: 0 };
+}
+
 // createWorldMapEngine — the stateful engine. Same factory contract as the
 // other engines (createXxxEngine(world)) for consistency, even though it never
 // touches the action log. Holds only a provably-redundant materialization cache
-// and seeds a deterministic origin node at (0, 0).
+// and seeds a deterministic, guaranteed-passable origin node near (0, 0).
 export function createWorldMapEngine(world) {
   const { config } = world.getState();
   readWorldMap(config); // validate up front, mirroring the other engines' guards
@@ -297,8 +328,11 @@ export function createWorldMapEngine(world) {
     return storeNode({ ...derived, edges: [] });
   }
 
-  // The deterministic origin. Terrain at (0,0) is pure, so this is fixed.
-  const origin = materializeNode(0, 0);
+  // The deterministic, guaranteed-passable seed node near (0,0). Both its
+  // position and its terrain are pure functions of (seed, config), so it is
+  // fixed and fully rebuildable.
+  const originCoord = findPassableOrigin(config);
+  const origin = materializeNode(originCoord.x, originCoord.y);
 
   // Nearest already-materialized node within `radius` of (x, y), or null.
   function findNear(x, y, radius, excludeId) {
