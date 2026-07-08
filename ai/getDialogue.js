@@ -8,6 +8,7 @@
 import { buildDialoguePrompt } from './buildDialoguePrompt.js';
 import { generateDialogue } from './generateDialogue.js';
 import { fallbackDialogue } from './fallbackDialogue.js';
+import { log } from '../debugLog.js';
 
 /**
  * @param {Object} entity - the speaking NPC
@@ -21,10 +22,10 @@ export async function getDialogue(entity, relationship, recentMemories, playerIn
   const attempt = await generateDialogue(prompt);
 
   if (attempt.ok) {
-    console.log('[AI] dialogue generated (live AI path)');
+    log('AI', 'dialogue generated (live AI path)');
     return { source: 'ai', response: attempt.response };
   }
 
-  console.log(`[AI] ${attempt.reason} -> fallback`);
+  log('AI', `${attempt.reason} -> fallback`);
   return { source: 'fallback', response: fallbackDialogue(entity, relationship) };
 }

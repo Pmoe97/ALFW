@@ -36,6 +36,7 @@ import {
   deriveTotalGameSeconds,
 } from './engines/worldClockEngine.js';
 import { createTickSource } from './game/tickSource.js';
+import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
 const NPC = 'npc_mira';
@@ -925,6 +926,67 @@ paused.tick.stop(); // resume() started a real interval; clear it so Node exits 
 console.log(`I5 PASSED: pause() latches and start() no-ops while paused (game-s held at ${totalWhilePaused}); real tab-blur pausing is eyeballed live`);
 
 console.log('\nSection I PASSED: the runtime tick source feeds CLOCK_TICKs into the proven clock; dilation switches, determinism, and rebuildability all hold');
+
+// =============================================================================
+// Section J: debugLog — toggleable console channels, independent of engine
+// behavior. Seeds a small foundation for eventually organizing ALL console
+// output into independently-toggleable channels, so bug-hunting can target
+// one subsystem's log lines instead of the whole thing. The load-bearing
+// property this proves: silencing a channel is a PURE side-effect toggle — it
+// never changes dispatch, the event log, or anything derived from it.
+// =============================================================================
+console.log('\n=== Section J: debugLog toggleable console channels ===');
+
+// --- J1: WorldClockEngine ships DISABLED by default -------------------------
+// It is by far the noisiest channel (one line per CLOCK_TICK, and ticks fire
+// once a second during live play) — this is the actual behavior being seeded.
+assert.equal(isChannelEnabled('WorldClockEngine'), false, 'WorldClockEngine must default to disabled — it is the noisiest channel by far');
+console.log("J1 PASSED: 'WorldClockEngine' channel defaults to disabled");
+
+// --- J2: silencing a channel never changes what it silences -----------------
+// Same tick/context sequence run twice — once with the channel at its shipped
+// default (disabled), once with it explicitly re-enabled — must derive the
+// identical total. If it didn't, logging would no longer be a pure side effect.
+const silentWorld = buildTickWorld();
+silentWorld.tick.simulateTicks(5);
+silentWorld.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'traveling' });
+silentWorld.tick.simulateTicks(3);
+
+setChannelEnabled('WorldClockEngine', true);
+const loudWorld = buildTickWorld();
+loudWorld.tick.simulateTicks(5);
+loudWorld.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'traveling' });
+loudWorld.tick.simulateTicks(3);
+setChannelEnabled('WorldClockEngine', false); // restore the shipped default
+
+assert.equal(
+  loudWorld.clock.getTotalGameSeconds(),
+  silentWorld.clock.getTotalGameSeconds(),
+  'an identical tick/context sequence must derive an identical total regardless of the WorldClockEngine console channel being on or off'
+);
+console.log(`J2 PASSED: identical sequence derives ${silentWorld.clock.getTotalGameSeconds()} game-s whether the channel is silenced or not — logging is a pure side effect`);
+
+// --- J3: log() actually gates console.log on the channel's toggle state -----
+const originalConsoleLog = console.log;
+let callCount = 0;
+console.log = (...args) => {
+  callCount++;
+  originalConsoleLog(...args);
+};
+try {
+  setChannelEnabled('SectionJTestChannel', false);
+  log('SectionJTestChannel', 'should NOT print');
+  assert.equal(callCount, 0, 'a disabled channel must not call console.log');
+
+  setChannelEnabled('SectionJTestChannel', true);
+  log('SectionJTestChannel', 'should print');
+  assert.equal(callCount, 1, 'an enabled channel must call console.log exactly once per log() call');
+} finally {
+  console.log = originalConsoleLog;
+}
+console.log('J3 PASSED: log() gates console.log on the channel toggle exactly as expected');
+
+console.log('\nSection J PASSED: console channels toggle independent of engine state; WorldClockEngine ships silenced by default');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed

@@ -23,6 +23,8 @@
 // WorldConfig calendar settings and a total-seconds number, out comes a date
 // object. No state, no game logic.
 
+import { log } from '../debugLog.js';
+
 const SECONDS_PER_HOUR = 3600;
 const SECONDS_PER_MINUTE = 60;
 const DEFAULT_TIME_CONTEXT = 'idle';
@@ -161,16 +163,18 @@ export function createWorldClockEngine(world) {
       );
     }
     cachedTotalGameSeconds += entry.payload.realSecondsElapsed * multiplier;
-    console.log(
-      `[WorldClockEngine] tick +${entry.payload.realSecondsElapsed}s real ` +
+    log(
+      'WorldClockEngine',
+      `tick +${entry.payload.realSecondsElapsed}s real ` +
         `× ${multiplier} (${context}) → ${cachedTotalGameSeconds}s game total`
     );
   });
 
   world.subscribe('CLOCK_JUMP', (entry) => {
     cachedTotalGameSeconds += entry.payload.gameSecondsElapsed;
-    console.log(
-      `[WorldClockEngine] jump +${entry.payload.gameSecondsElapsed}s game ` +
+    log(
+      'WorldClockEngine',
+      `jump +${entry.payload.gameSecondsElapsed}s game ` +
         `(flat, no multiplier) → ${cachedTotalGameSeconds}s game total`
     );
   });

@@ -23,6 +23,7 @@ import { createTickSource } from './tickSource.js';
 import { helpNpc, robNpc, ignoreNpc } from '../actions/playerActions.js';
 import { relationshipTier } from '../entities/relationshipStore.js';
 import { getDialogue } from '../ai/getDialogue.js';
+import { log, setChannelEnabled } from '../debugLog.js';
 
 const { world, registry, relationships, mira, rowan, sable } = buildSampleWorld();
 createRelationshipEffectEngine(world, relationships);
@@ -104,6 +105,12 @@ function debugSetContext(name) {
   renderClock();
 }
 window.debugSetContext = debugSetContext; // also console-callable
+
+// Console channels: toggleable independent of engine behavior (debugLog.js).
+// Silencing a channel never stops what it silences — WorldClockEngine keeps
+// ticking into the log at the same rate whether its channel is on or off.
+window.setLogChannel = setChannelEnabled; // e.g. setLogChannel('WorldClockEngine', true)
+console.log("[DebugLog] Console channels are toggleable: setLogChannel('WorldClockEngine', true) to re-enable tick/jump logs (off by default — very high frequency).");
 document.getElementById('btn-ctx-idle').addEventListener('click', () => debugSetContext('idle'));
 document.getElementById('btn-ctx-traveling').addEventListener('click', () => debugSetContext('traveling'));
 document.getElementById('btn-ctx-chatting').addEventListener('click', () => debugSetContext('chatting'));
@@ -141,7 +148,7 @@ document.getElementById('btn-talk').addEventListener('click', async () => {
   const playerLine = playerInputEl.value;
   const edge = relationships.getRelationship(mira.id, rowan.id);
   const result = await getDialogue(mira, edge, mira.psychology.memories, playerLine);
-  console.log('[TestHarness] dialogue result:', result);
+  log('TestHarness', 'dialogue result:', result);
   dialogueOutputEl.textContent = JSON.stringify(
     { source: result.source, dialogue: result.response.dialogue },
     null,

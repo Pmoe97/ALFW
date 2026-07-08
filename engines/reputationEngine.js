@@ -5,11 +5,11 @@
 // reflected without touching the log. (A cached running total can come later
 // for performance, but it must stay rebuildable from the log alone.)
 
+import { log } from '../debugLog.js';
+
 export function createReputationEngine(world) {
   world.subscribe('FARM_HARVESTED', (entry) => {
-    console.log(
-      `[ReputationEngine] noted harvest by ${entry.payload.npcId} (log seq ${entry.seq})`
-    );
+    log('ReputationEngine', `noted harvest by ${entry.payload.npcId} (log seq ${entry.seq})`);
   });
 
   function getReputation(npcId, weightPerQuality = 2) {
