@@ -10,7 +10,13 @@ import { readFileSync } from 'node:fs';
 // mulberry32 — tiny public-domain seeded PRNG. Every piece of randomness in
 // the world must come from here (via world.random()), never Math.random(),
 // so a world is fully reproducible from its config + action sequence.
-function mulberry32(seed) {
+//
+// Exported so systems that need position-deterministic (not call-order
+// dependent) randomness — e.g. WorldMapEngine seeding a fresh generator per
+// noise-lattice point from (seed, gridX, gridY) — can reuse THIS one RNG
+// algorithm rather than introducing a parallel one. The shared world.random
+// stream is a single stateful sequence and is unsuitable for that.
+export function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {
     a = (a + 0x6d2b79f5) | 0;
