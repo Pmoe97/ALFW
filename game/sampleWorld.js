@@ -158,17 +158,22 @@ export function buildSampleWorld() {
   registry.register(mira);
   registry.register(rowan);
 
+  // createRelationshipStore subscribes to RELATIONSHIP_EVENT in its constructor,
+  // so it must be built BEFORE the seed dispatches below (and before any engine
+  // that dispatches relationship events) or the cache would miss these events.
   const relationships = createRelationshipStore(world);
-  relationships.setRelationship(
-    rowan.id, mira.id,
-    { affection: 25, comfort: 20, trust: 15, desire: 10, obedience: 5 },
-    'Mira'
-  );
-  relationships.setRelationship(
-    mira.id, rowan.id,
-    { affection: 30, comfort: 25, trust: 20, desire: 10, obedience: 2 },
-    'traveler'
-  );
+
+  // Seed the two starting edges. Stats are now log-derived, so the starting
+  // values are dispatched as RELATIONSHIP_EVENTs (one per non-zero axis); the
+  // asymmetric fromCallsTo label is direct-set.
+  function seedEdge(fromId, toId, stats, label) {
+    relationships.setLabel(fromId, toId, label);
+    for (const [axis, delta] of Object.entries(stats)) {
+      if (delta !== 0) relationships.recordRelationshipEvent(fromId, toId, axis, delta);
+    }
+  }
+  seedEdge(rowan.id, mira.id, { affection: 25, comfort: 20, trust: 15, desire: 10, obedience: 5 }, 'Mira');
+  seedEdge(mira.id, rowan.id, { affection: 30, comfort: 25, trust: 20, desire: 10, obedience: 2 }, 'traveler');
 
   return { world, registry, relationships, mira, rowan };
 }

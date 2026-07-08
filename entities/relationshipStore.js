@@ -3,9 +3,16 @@
 // Entities know nothing about who they're connected to. Relationships live
 // here as directed edges keyed by (fromId, toId), so a player<->NPC edge and
 // an NPC<->NPC edge work identically. Built as a factory taking the world
-// instance, matching the engine pattern in engines/, even though this store
-// doesn't dispatch or subscribe to anything yet — that keeps the shape
-// consistent for when it does.
+// instance, matching the engine pattern in engines/.
+//
+// The five relationship stats (affection, comfort, trust, desire, obedience)
+// are DERIVED values, never a mutable object a caller overwrites. They are the
+// running sum of RELATIONSHIP_EVENT actions in the append-only world event log,
+// exactly the way engines/worldClockEngine.js derives game-time and
+// engines/reputationEngine.js derives reputation: an incrementally-maintained
+// cache that is always fully rebuildable from the log alone (see
+// deriveRelationshipStats / rebuildRelationshipStats). fromCallsTo labels and
+// family ties are deliberately NOT log-derived — they stay direct-set.
 
 /**
  * @typedef {Object} RelationshipStats
@@ -26,11 +33,28 @@
  */
 
 /**
+ * @typedef {Object} RelationshipHistory
+ * @property {number} count - number of RELATIONSHIP_EVENT entries for the pair
+ * @property {number} totalWeight - sum of absolute weights across those entries
+ */
+
+/**
  * @typedef {Object} FamilyTie
  * @property {string} fromId
  * @property {string} toId
  * @property {'parent'|'child'|'sibling'|'spouse'|'other'} relation
  */
+
+// The five axes a RELATIONSHIP_EVENT may target. Any event whose axis is not
+// one of these is ignored by the derivation (defensive — never throws on a
+// stray payload).
+const RELATIONSHIP_AXES = Object.freeze([
+  'affection',
+  'comfort',
+  'trust',
+  'desire',
+  'obedience',
+]);
 
 const DEFAULT_RELATIONSHIP_STATS = Object.freeze({
   affection: 0,
@@ -55,32 +79,114 @@ const INVERSE_RELATION = {
   other: 'other',
 };
 
+// deriveRelationshipStats — pure. Replays every RELATIONSHIP_EVENT for the
+// directed (fromId, toId) pair in log order and sums deltas per axis, starting
+// from all-zero. This is the single source of truth for a pair's stats; the
+// store's cache is only ever an optimization that must reproduce this exactly.
+//
+// weight is intentionally NOT applied to stat sums — it belongs to history /
+// future stickiness math only (see deriveRelationshipHistory). Stats are a
+// plain sum of deltas.
+export function deriveRelationshipStats(log, fromId, toId) {
+  const stats = { ...DEFAULT_RELATIONSHIP_STATS };
+  for (const entry of log) {
+    if (entry.type !== 'RELATIONSHIP_EVENT') continue;
+    const { fromId: f, toId: t, axis, delta } = entry.payload;
+    if (f !== fromId || t !== toId) continue;
+    if (!RELATIONSHIP_AXES.includes(axis)) continue;
+    stats[axis] += delta;
+  }
+  return stats;
+}
+
+// deriveRelationshipHistory — pure. Returns the raw event count and total
+// absolute weight for a directed pair. This is NOT a sixth stat: it exists
+// purely so stickiness/decay math can be layered on top later (a long, heavy
+// history should be harder to move than a shallow one). No decay math lives
+// here — this only exposes the raw count/weight so it CAN be used.
+export function deriveRelationshipHistory(log, fromId, toId) {
+  let count = 0;
+  let totalWeight = 0;
+  for (const entry of log) {
+    if (entry.type !== 'RELATIONSHIP_EVENT') continue;
+    const { fromId: f, toId: t, weight } = entry.payload;
+    if (f !== fromId || t !== toId) continue;
+    count += 1;
+    totalWeight += Math.abs(weight ?? 1);
+  }
+  return { count, totalWeight };
+}
+
 export function createRelationshipStore(world) {
-  const relationships = new Map();
+  // cachedStats: edgeKey -> a mutable stats object owned solely by this store.
+  // Never handed out by reference (getRelationship clones), and always fully
+  // rebuildable from the log via deriveRelationshipStats.
+  const cachedStats = new Map();
+  // labels: edgeKey -> fromCallsTo. Direct-set, no log involvement — a label is
+  // inherently asymmetric and carries no history worth replaying.
+  const labels = new Map();
   const familyTies = new Map();
 
-  // setFamilyTie() writes both directions, so getFamilyTie() is queryable
-  // from either side after a single call. setRelationship() stays
-  // one-directional — fromCallsTo is inherently asymmetric and must be set
-  // per side.
-  function setRelationship(fromId, toId, stats, fromCallsTo) {
-    relationships.set(edgeKey(fromId, toId), {
+  // ORDER MATTERS: this subscription must be registered before any
+  // RELATIONSHIP_EVENT is dispatched — including the seed recordRelationshipEvent
+  // calls in game/sampleWorld.js — or the cache will miss those early events and
+  // silently go stale (only rebuildRelationshipStats would then be correct).
+  // Construct the store before wiring engines / seeding, as sampleWorld does.
+  world.subscribe('RELATIONSHIP_EVENT', (entry) => {
+    const { fromId, toId, axis, delta } = entry.payload;
+    if (!RELATIONSHIP_AXES.includes(axis)) return;
+    const key = edgeKey(fromId, toId);
+    let stats = cachedStats.get(key);
+    if (!stats) {
+      // Fresh clone per edge. DEFAULT_RELATIONSHIP_STATS is frozen at module
+      // scope: assigning it directly would throw on the first mutation, and
+      // sharing one clone across pairs would alias every relationship into one
+      // mutually-corrupting object. One independent clone per new edgeKey.
+      stats = { ...DEFAULT_RELATIONSHIP_STATS };
+      cachedStats.set(key, stats);
+    }
+    stats[axis] += delta;
+  });
+
+  // recordRelationshipEvent — the single sanctioned way to move a stat. It only
+  // dispatches the action; the subscribe handler above updates the cache. This
+  // keeps stats append-only and rebuildable, unlike the removed setRelationship.
+  function recordRelationshipEvent(fromId, toId, axis, delta, weight = 1) {
+    return world.dispatch('RELATIONSHIP_EVENT', {
       fromId,
       toId,
-      stats: { ...stats },
-      fromCallsTo,
+      axis,
+      delta,
+      weight,
     });
   }
 
+  // setLabel — direct-set what fromId calls toId. Asymmetric and per-side, so
+  // there is no auto-inverse here (unlike setFamilyTie). No log involvement.
+  function setLabel(fromId, toId, fromCallsTo) {
+    labels.set(edgeKey(fromId, toId), fromCallsTo);
+  }
+
   function getRelationship(fromId, toId) {
-    return (
-      relationships.get(edgeKey(fromId, toId)) ?? {
-        fromId,
-        toId,
-        stats: { ...DEFAULT_RELATIONSHIP_STATS },
-        fromCallsTo: '',
-      }
-    );
+    const cached = cachedStats.get(edgeKey(fromId, toId));
+    return {
+      fromId,
+      toId,
+      // Clone so callers can never mutate the store's cached object.
+      stats: cached ? { ...cached } : { ...DEFAULT_RELATIONSHIP_STATS },
+      fromCallsTo: labels.get(edgeKey(fromId, toId)) ?? '',
+    };
+  }
+
+  // rebuildRelationshipStats — recompute a pair's stats from the log alone,
+  // ignoring the cache. Its equality with getRelationship().stats is the
+  // rebuildability proof (mirrors worldClockEngine.rebuildTotalGameSeconds).
+  function rebuildRelationshipStats(fromId, toId) {
+    return deriveRelationshipStats(world.getEventLog(), fromId, toId);
+  }
+
+  function getRelationshipHistory(fromId, toId) {
+    return deriveRelationshipHistory(world.getEventLog(), fromId, toId);
   }
 
   function setFamilyTie(fromId, toId, relation) {
@@ -92,12 +198,22 @@ export function createRelationshipStore(world) {
     return familyTies.get(edgeKey(fromId, toId)) ?? null;
   }
 
-  return { setRelationship, getRelationship, setFamilyTie, getFamilyTie };
+  return {
+    getRelationship,
+    setLabel,
+    recordRelationshipEvent,
+    rebuildRelationshipStats,
+    getRelationshipHistory,
+    setFamilyTie,
+    getFamilyTie,
+  };
 }
 
 // Tier thresholds over the average of the five stats. Provisional first pass
-// only — not final game balance, adjust cutoffs here as needed.
-const TIER_THRESHOLDS = [
+// only — not final game balance, adjust cutoffs here as needed. Used only as
+// the fallback ladder below the divergence checks in relationshipTier. Exported
+// so tests can assert the fallback against the exact same ladder it uses.
+export const TIER_THRESHOLDS = [
   { max: -10, label: 'hostile' },
   { max: 10, label: 'stranger' },
   { max: 30, label: 'acquaintance' },
@@ -106,11 +222,24 @@ const TIER_THRESHOLDS = [
 ];
 
 /**
- * Relationship tier is always derived from stats, never stored. Recompute
- * it any time the stats change instead of caching a label on the edge.
+ * Relationship tier is always derived from stats, never stored. Recompute it
+ * any time the stats change instead of caching a label on the edge.
+ *
+ * Divergence-check-first: archetype rules that read specific axes run BEFORE the
+ * average fallback, so relationships whose axes pull apart get a legible label
+ * instead of being flattened to a bland middle tier. A high-affection /
+ * low-trust "frenemy" would otherwise average to a plain 'stranger'/
+ * 'acquaintance'; here it reads as 'complicated'. This ladder is intentionally
+ * extensible — add more archetype rules above the fallback average without
+ * restructuring.
  */
 export function relationshipTier(stats) {
   const { affection, comfort, trust, desire, obedience } = stats;
+
+  if (affection >= 40 && trust <= 0) return 'complicated'; // frenemy: warm but untrusted
+  if (affection <= 0 && obedience >= 40) return 'resentful'; // obeys without any warmth
+
+  // Fallback: the average-based ladder for ordinary, non-divergent relationships.
   const average = (affection + comfort + trust + desire + obedience) / 5;
   return TIER_THRESHOLDS.find((tier) => average <= tier.max).label;
 }

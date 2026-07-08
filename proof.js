@@ -13,7 +13,13 @@ import { initWorldState } from './worldState.js';
 import { createFarmEngine } from './engines/farmEngine.js';
 import { createReputationEngine } from './engines/reputationEngine.js';
 import { createPlayer, createNpc, effectiveSkill } from './entities/entitySchema.js';
-import { createRelationshipStore, relationshipTier } from './entities/relationshipStore.js';
+import {
+  createRelationshipStore,
+  relationshipTier,
+  deriveRelationshipStats,
+  deriveRelationshipHistory,
+  TIER_THRESHOLDS,
+} from './entities/relationshipStore.js';
 import { validateDialogueResponse } from './ai/responseContract.js';
 import { buildDialoguePrompt } from './ai/buildDialoguePrompt.js';
 import { fallbackDialogue } from './ai/fallbackDialogue.js';
@@ -227,16 +233,17 @@ console.log('effectiveSkill check PASSED: matches hand-computed raw + floor(attr
 // --- 10. Relationship edges are directional and independent per side --------
 const relationships = createRelationshipStore(world);
 
-relationships.setRelationship(
-  rowan.id, mira.id,
-  { affection: 25, comfort: 20, trust: 15, desire: 10, obedience: 5 },
-  'Mira'
-);
-relationships.setRelationship(
-  mira.id, rowan.id,
-  { affection: 30, comfort: 25, trust: 20, desire: 10, obedience: 2 },
-  'traveler'
-);
+// Stats are log-derived: seed an edge by direct-setting its (asymmetric) label
+// and dispatching one RELATIONSHIP_EVENT per non-zero starting stat.
+function seedEdge(store, fromId, toId, stats, label) {
+  store.setLabel(fromId, toId, label);
+  for (const [axis, delta] of Object.entries(stats)) {
+    if (delta !== 0) store.recordRelationshipEvent(fromId, toId, axis, delta);
+  }
+}
+
+seedEdge(relationships, rowan.id, mira.id, { affection: 25, comfort: 20, trust: 15, desire: 10, obedience: 5 }, 'Mira');
+seedEdge(relationships, mira.id, rowan.id, { affection: 30, comfort: 25, trust: 20, desire: 10, obedience: 2 }, 'traveler');
 
 const playerToNpc = relationships.getRelationship(rowan.id, mira.id);
 const npcToPlayer = relationships.getRelationship(mira.id, rowan.id);
@@ -249,11 +256,8 @@ console.log(`Directionality check PASSED: Rowan calls her "${playerToNpc.fromCal
 const tierBefore = relationshipTier(playerToNpc.stats);
 console.log(`\nplayer->npc tier before: ${tierBefore} (avg of stats = ${(25 + 20 + 15 + 10 + 5) / 5})`);
 
-relationships.setRelationship(
-  rowan.id, mira.id,
-  { ...playerToNpc.stats, trust: 100 },
-  playerToNpc.fromCallsTo
-);
+// Raise trust from 15 to 100 via a single derived event (+85), not an overwrite.
+relationships.recordRelationshipEvent(rowan.id, mira.id, 'trust', 85);
 const updatedEdge = relationships.getRelationship(rowan.id, mira.id);
 const tierAfter = relationshipTier(updatedEdge.stats);
 console.log(`player->npc tier after raising trust to 100: ${tierAfter} (avg of stats = ${(25 + 20 + 100 + 10 + 5) / 5})`);
@@ -656,6 +660,93 @@ assert.equal(deriveActiveTimeContext([]), 'idle', 'empty log ⇒ default idle co
 console.log('F6 PASSED: totalGameSeconds 0 ⇒ Year 1, Rain, Week 1, Day 1, 06:00:00; empty log ⇒ idle');
 
 console.log('\nSection F PASSED: game-time is derived from the log — dilated ticks, flat jumps, rebuildable, config-driven');
+
+// =============================================================================
+// Section G: RelationshipStore — stats derived from a RELATIONSHIP_EVENT log,
+// and a divergence-first tier that gives frenemy-shaped relationships a legible
+// label instead of averaging them into a bland middle tier. Self-contained on
+// its own world with throwaway ids so it is independent of the mira/rowan
+// seeding above; different id pairs keep the cases from cross-contaminating.
+// =============================================================================
+console.log('\n=== Section G: RelationshipStore (log-derived stats + divergence-first tier) ===');
+
+const relWorld = initWorldState(CONFIG_PATH);
+const rel = createRelationshipStore(relWorld);
+
+// --- G1: multi-axis derived stats equal hand-calculated per-axis delta sums --
+// weight is deliberately varied and must NOT affect the stat sums (it feeds
+// history/stickiness only).
+rel.recordRelationshipEvent('g1_a', 'g1_b', 'affection', 10, 1);
+rel.recordRelationshipEvent('g1_a', 'g1_b', 'affection', 5, 2);
+rel.recordRelationshipEvent('g1_a', 'g1_b', 'trust', -3, 1);
+rel.recordRelationshipEvent('g1_a', 'g1_b', 'comfort', 7, 3);
+rel.recordRelationshipEvent('g1_a', 'g1_b', 'desire', 2);
+rel.recordRelationshipEvent('g1_a', 'g1_b', 'obedience', -4);
+const g1Expected = { affection: 15, comfort: 7, trust: -3, desire: 2, obedience: -4 };
+const g1Derived = deriveRelationshipStats(relWorld.getEventLog(), 'g1_a', 'g1_b');
+assert.deepEqual(g1Derived, g1Expected, 'derived stats must equal the hand-summed per-axis deltas');
+assert.deepEqual(rel.getRelationship('g1_a', 'g1_b').stats, g1Expected, 'cached stats must match the derivation');
+console.log(`G1 PASSED: derived stats ${JSON.stringify(g1Derived)} match hand sums (weight ignored for stats)`);
+
+// --- G2: frenemy => 'complicated' (LOAD-BEARING) ----------------------------
+// Repeated +affection interleaved with -trust: warm but untrusted. Averaging
+// the five axes would flatten this to a bland middle tier; the divergence rule
+// must instead read it as 'complicated'.
+for (let i = 0; i < 6; i++) {
+  rel.recordRelationshipEvent('g2_a', 'g2_b', 'affection', 10);
+  rel.recordRelationshipEvent('g2_a', 'g2_b', 'trust', -8);
+}
+const g2Stats = rel.getRelationship('g2_a', 'g2_b').stats; // affection 60, trust -48
+const g2Tier = relationshipTier(g2Stats);
+// What the OLD average-only logic would have produced, computed inline:
+const g2Avg = (g2Stats.affection + g2Stats.comfort + g2Stats.trust + g2Stats.desire + g2Stats.obedience) / 5;
+const g2AvgTier = TIER_THRESHOLDS.find((t) => g2Avg <= t.max).label;
+assert.equal(g2Tier, 'complicated', 'frenemy (high affection, low trust) must read as complicated');
+assert.notEqual(g2Tier, g2AvgTier, 'complicated must NOT collapse to the average-based tier');
+console.log(`G2 PASSED: affection ${g2Stats.affection} / trust ${g2Stats.trust} → '${g2Tier}', NOT the averaged '${g2AvgTier}' (avg ${g2Avg})`);
+
+// --- G3: resentful subordinate => 'resentful' -------------------------------
+// Low affection, high obedience: obeys without any warmth.
+rel.recordRelationshipEvent('g3_a', 'g3_b', 'affection', -10);
+rel.recordRelationshipEvent('g3_a', 'g3_b', 'affection', -10);
+rel.recordRelationshipEvent('g3_a', 'g3_b', 'obedience', 50);
+const g3Tier = relationshipTier(rel.getRelationship('g3_a', 'g3_b').stats);
+assert.equal(g3Tier, 'resentful', 'low affection + high obedience must read as resentful');
+console.log(`G3 PASSED: affection -20 / obedience 50 → '${g3Tier}'`);
+
+// --- G4: boring, all axes together => falls through to the average ladder ----
+// Proves the archetype rules don't over-trigger on ordinary relationships.
+for (const axis of ['affection', 'comfort', 'trust', 'desire', 'obedience']) {
+  rel.recordRelationshipEvent('g4_a', 'g4_b', axis, 50);
+}
+const g4Stats = rel.getRelationship('g4_a', 'g4_b').stats; // all 50
+const g4Tier = relationshipTier(g4Stats);
+const g4Avg = (g4Stats.affection + g4Stats.comfort + g4Stats.trust + g4Stats.desire + g4Stats.obedience) / 5;
+const g4AvgTier = TIER_THRESHOLDS.find((t) => g4Avg <= t.max).label;
+assert.equal(g4Tier, g4AvgTier, 'a non-divergent relationship must use the average-based ladder');
+assert.equal(g4Tier, 'friend', 'all axes at 50 averages to friend');
+assert.ok(g4Tier !== 'complicated' && g4Tier !== 'resentful', 'archetype rules must not over-trigger');
+console.log(`G4 PASSED: all axes 50 → '${g4Tier}' via the average ladder (archetype rules did not fire)`);
+
+// --- G5: rebuild-from-log-only equals the cached total ----------------------
+rel.recordRelationshipEvent('g5_a', 'g5_b', 'affection', 12);
+rel.recordRelationshipEvent('g5_a', 'g5_b', 'trust', -4);
+rel.recordRelationshipEvent('g5_a', 'g5_b', 'comfort', 9);
+const g5Cached = rel.getRelationship('g5_a', 'g5_b').stats;
+const g5Rebuilt = rel.rebuildRelationshipStats('g5_a', 'g5_b');
+assert.deepEqual(g5Rebuilt, g5Cached, 'stats rebuilt from the log alone must equal the incrementally-cached stats');
+console.log(`G5 PASSED: cached ${JSON.stringify(g5Cached)} == rebuilt-from-log ${JSON.stringify(g5Rebuilt)}`);
+
+// --- G6: deriveRelationshipHistory returns count + total ABSOLUTE weight -----
+rel.recordRelationshipEvent('g6_a', 'g6_b', 'affection', 5, 1);
+rel.recordRelationshipEvent('g6_a', 'g6_b', 'trust', -2, 2);
+rel.recordRelationshipEvent('g6_a', 'g6_b', 'comfort', 1, 3);
+rel.recordRelationshipEvent('g6_a', 'g6_b', 'desire', 4, -1); // negative weight ⇒ abs 1
+const g6History = deriveRelationshipHistory(relWorld.getEventLog(), 'g6_a', 'g6_b');
+assert.deepEqual(g6History, { count: 4, totalWeight: 7 }, 'history must be event count and Σ|weight| (1+2+3+1)');
+console.log(`G6 PASSED: history ${JSON.stringify(g6History)} (4 events, Σ|weight| = 7)`);
+
+console.log('\nSection G PASSED: relationship stats are log-derived and rebuildable; divergent pairs read as complicated/resentful, ordinary pairs fall through');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
