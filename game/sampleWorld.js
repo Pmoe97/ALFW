@@ -54,6 +54,19 @@ const WORLD_CONFIG = {
       denseForestMoisture: 0.88,
       falloffScale: 200,
     },
+    classification: {
+      settlement: {
+        cellSize: 60,
+        minSpacing: 40,
+        suitabilityThreshold: 0.55,
+        snapRadius: 3,
+        tierNoiseScale: 120,
+        tierThresholds: { hamlet: 0.0, village: 0.4, town: 0.52, city: 0.62, capital: 0.72 },
+        tierSpacingMultiplier: { hamlet: 1.0, village: 1.5, town: 2.5, city: 4.0, capital: 6.0 },
+      },
+      faction: { factionCount: 3, territoryNoiseScale: 300, uncontrolledThreshold: 0.25 },
+      environment: { notabilityNoiseScale: 30, notabilityRarityExponent: 2.0, notabilityLandmarkThreshold: 0.6 },
+    },
   },
 };
 

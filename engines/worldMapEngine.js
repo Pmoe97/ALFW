@@ -52,6 +52,24 @@ const CANDIDATE_SALT = 777;
 // the band collapses toward the center at extreme distance.
 const FALLOFF_BAND = 0.2;
 
+// --- Classification channels/salts (node-classification layer) --------------
+// All distinct from the terrain channels (11, 29) and the candidate salt (777)
+// so classification randomness never correlates with terrain or node jitter.
+// SETTLEMENT_SITE_SALT seeds the per-cell jittered settlement-site position;
+// CHANNEL_TIER / CHANNEL_NOTABILITY / CHANNEL_FACTION_TERRITORY are independent
+// coherent fbm fields for tier rolls, environmental notability, and the coarse
+// faction-territory partition respectively.
+const SETTLEMENT_SITE_SALT = 4001;
+const CHANNEL_TIER = 53;
+const CHANNEL_NOTABILITY = 71;
+const CHANNEL_FACTION_TERRITORY = 97;
+
+// The settlement tier ladder, ascending. Index doubles as the base priority
+// rank (capital outranks city outranks town ...), and the names are the labels
+// a node's classification carries. Population/density is a separate future task;
+// this pass only assigns the label.
+const SETTLEMENT_TIERS = ['hamlet', 'village', 'town', 'city', 'capital'];
+
 const DEG2RAD = Math.PI / 180;
 
 function readWorldMap(config) {
@@ -59,6 +77,19 @@ function readWorldMap(config) {
   if (!wm) throw new Error('WorldConfig is missing worldMap');
   if (!wm.terrain) throw new Error('WorldConfig is missing worldMap.terrain');
   return wm;
+}
+
+// The classification sub-block (settlements / faction / environment). Kept as a
+// separate guarded reader so callers that only touch terrain never pay for it,
+// mirroring readWorldMap's up-front validation.
+function readClassification(config) {
+  const wm = readWorldMap(config);
+  const c = wm.classification;
+  if (!c) throw new Error('WorldConfig is missing worldMap.classification');
+  if (!c.settlement) throw new Error('WorldConfig is missing worldMap.classification.settlement');
+  if (!c.faction) throw new Error('WorldConfig is missing worldMap.classification.faction');
+  if (!c.environment) throw new Error('WorldConfig is missing worldMap.classification.environment');
+  return c;
 }
 
 // The map seed: an explicit worldMap.seed when set, else the main world seed —
@@ -211,6 +242,283 @@ export function deriveTerrainAt(config, x, y) {
   return { elevation, moisture, terrainType, passable };
 }
 
+// =============================================================================
+// NODE CLASSIFICATION LAYER — PURE derived values over (config, coords) plus the
+// already-derived terrain, following the exact discipline deriveTerrainAt set:
+// determinism by POSITION, never by exploration order. There is still nothing to
+// replay here (settlements/notability/hospitability are pure), so the shape
+// mirrors deriveTerrainAt — NOT deriveRelationshipStats. The ONE exception is
+// faction control, which layers log-event overrides on top of the pure baseline
+// derived here; that lives in engines/factionEngine.js.
+// =============================================================================
+
+// deriveHospitability — PURE. A [0,1] "how livable is this coordinate" scalar,
+// derived from the already-derived terrain. High for passable, moderate-
+// elevation, near-water, pastoral terrain; low for cliffs, deep water, and dense
+// forest. This SINGLE scalar is reused two ways: it gates settlement placement
+// (the suitability test) and it flavors wilderness nodes (benign/pastoral vs.
+// hostile/dangerous). "Near water" is a bounded, pure probe of a ring of nearby
+// coordinates — coherent, not an independent per-node roll.
+const HOSPITABILITY_TYPE_BASE = {
+  plains: 0.75,
+  shore: 0.7,
+  forest: 0.55,
+  hills: 0.5,
+  dense_forest: 0.25,
+  cliff: 0.1,
+  deep_water: 0.05,
+};
+const HOSPITABILITY_PROBES = 8;
+export function deriveHospitability(config, x, y) {
+  const wm = readWorldMap(config);
+  const t = wm.terrain;
+  const own = deriveTerrainAt(config, x, y);
+
+  // Base livability by terrain type.
+  let base = HOSPITABILITY_TYPE_BASE[own.terrainType] ?? 0.3;
+
+  // Moderate-elevation bonus: closeness to the center of the passable band
+  // (between water and cliff) reads as most livable.
+  const bandCenter = (t.waterLevel + t.cliffLevel) / 2;
+  const bandHalf = (t.cliffLevel - t.waterLevel) / 2 || 1;
+  const elevCloseness = 1 - Math.min(1, Math.abs(own.elevation - bandCenter) / bandHalf);
+
+  // Near-water bonus: probe a ring ~one inter-node hop out and reward proximity
+  // to shore/deep_water. Bounded and pure — a coherent measure, not a dice roll.
+  const probeR = wm.baseInterNodeDistance;
+  let waterHits = 0;
+  for (let i = 0; i < HOSPITABILITY_PROBES; i++) {
+    const a = (i / HOSPITABILITY_PROBES) * Math.PI * 2;
+    const tt = deriveTerrainAt(config, x + probeR * Math.cos(a), y + probeR * Math.sin(a)).terrainType;
+    if (tt === 'shore' || tt === 'deep_water') waterHits++;
+  }
+  const nearWater = waterHits / HOSPITABILITY_PROBES;
+
+  const score = 0.55 * base + 0.25 * elevCloseness + 0.2 * nearWater;
+  return Math.max(0, Math.min(1, score));
+}
+
+// deriveNotability — PURE. A [0,1] rarity-weighted scalar for non-settlement
+// nodes: mostly ordinary, occasionally a remarkable landmark. Coherent fbm noise
+// pushed through a rarity curve (exponent > 1) so high values are sparse — it
+// feels rare/clustered, NOT an evenly-distributed per-node roll. Only the value
+// is produced here; what a high value unlocks is the future POI engine's job.
+export function deriveNotability(config, x, y) {
+  const wm = readWorldMap(config);
+  const env = readClassification(config).environment;
+  const base = fbm(mapSeed(config), CHANNEL_NOTABILITY, x, y, env.notabilityNoiseScale, wm.terrain.octaves);
+  return Math.pow(base, env.notabilityRarityExponent);
+}
+
+// deriveBaselineFactionControl — PURE. The DEFAULT controlling faction at a
+// coordinate: a coarse coherent territory field quantized into `factionCount`
+// opaque placeholder ids, with a frontier band below `uncontrolledThreshold`
+// that returns null (uncontrolled). This is only the baseline; it can be
+// overridden going forward by FACTION_CONTROL_CHANGED log events replayed in
+// engines/factionEngine.js (derived baseline + log override, never a mutable
+// field). Real faction rosters/lore are future scope — ids are opaque strings.
+export function deriveBaselineFactionControl(config, x, y) {
+  const wm = readWorldMap(config);
+  const f = readClassification(config).faction;
+  const territory = fbm(mapSeed(config), CHANNEL_FACTION_TERRITORY, x, y, f.territoryNoiseScale, wm.terrain.octaves);
+  if (territory < f.uncontrolledThreshold) return null;
+  const span = 1 - f.uncontrolledThreshold || 1;
+  let idx = Math.floor(((territory - f.uncontrolledThreshold) / span) * f.factionCount);
+  if (idx >= f.factionCount) idx = f.factionCount - 1;
+  if (idx < 0) idx = 0;
+  return `faction_${idx}`;
+}
+
+// --- Settlement lattice (pure source of truth for placement + spacing) -------
+// Settlements live on a deterministic coarse grid, one candidate site per cell,
+// so min-spacing is resolved by PURE PRIORITY over derivable candidates — never
+// by which node materialized first. That is what makes settlement placement
+// order-independent under lazy generation (the same move deriveTerrainAt made).
+
+const tierRank = (tier) => SETTLEMENT_TIERS.indexOf(tier);
+
+function cellOf(x, y, cellSize) {
+  return { cx: Math.floor(x / cellSize), cy: Math.floor(y / cellSize) };
+}
+
+// tierForRoll — highest tier whose ascending threshold the roll clears. Higher
+// tiers have higher thresholds ⇒ they are rarer.
+function tierForRoll(tierThresholds, roll) {
+  let chosen = SETTLEMENT_TIERS[0];
+  for (const tier of SETTLEMENT_TIERS) {
+    const thr = tierThresholds[tier];
+    if (thr !== undefined && roll >= thr) chosen = tier;
+  }
+  return chosen;
+}
+
+// settlementSpacingOf — the tier-scaled minimum spacing a settlement of `tier`
+// reserves. Bigger settlements reserve more territory.
+export function settlementSpacingOf(config, tier) {
+  const s = readClassification(config).settlement;
+  return s.minSpacing * (s.tierSpacingMultiplier[tier] ?? 1);
+}
+
+// maxSettlementSpacing — the LARGEST possible tier-scaled spacing (capital tier).
+// This, not the base minSpacing, is what the suppression search must cover.
+export function maxSettlementSpacing(config) {
+  const s = readClassification(config).settlement;
+  let max = 0;
+  for (const tier of SETTLEMENT_TIERS) {
+    max = Math.max(max, s.minSpacing * (s.tierSpacingMultiplier[tier] ?? 1));
+  }
+  return max;
+}
+
+// settlementSearchCellRadius — how many cells out the Poisson-disk suppression
+// scan must reach, derived from maxSettlementSpacing (capital tier), NOT the base
+// minSpacing. Because sites are jittered anywhere inside their cell, two sites in
+// cells k apart can be as close as (k-1)*cellSize; to catch every suppressor
+// within maxSpacing we need (k-1)*cellSize < maxSpacing, i.e.
+// k <= ceil(maxSpacing/cellSize) + 1. The +1 covers the intra-cell jitter and
+// guarantees correctness at the capital tier for ANY cellSize (cellSize is only
+// a density/perf knob, never a correctness gate).
+export function settlementSearchCellRadius(config) {
+  const s = readClassification(config).settlement;
+  return Math.ceil(maxSettlementSpacing(config) / s.cellSize) + 1;
+}
+
+// deriveSettlementSiteInCell — PURE. The single jittered candidate site for a
+// cell, or null if that site's terrain is not suitable enough to host a
+// settlement. Position, suitability, and tier are all pure functions of
+// (seed, cell), so the candidate for a cell is fixed no matter how it is reached.
+export function deriveSettlementSiteInCell(config, cx, cy) {
+  const wm = readWorldMap(config);
+  const s = readClassification(config).settlement;
+  const seed = mapSeed(config);
+  const cellSize = s.cellSize;
+
+  const rng = mulberry32(hashCoords(seed, SETTLEMENT_SITE_SALT, cx, cy));
+  const x = (cx + rng()) * cellSize;
+  const y = (cy + rng()) * cellSize;
+
+  const suitability = deriveHospitability(config, x, y);
+  if (suitability < s.suitabilityThreshold) return null;
+
+  const roll = fbm(seed, CHANNEL_TIER, x, y, s.tierNoiseScale, wm.terrain.octaves);
+  const tier = tierForRoll(s.tierThresholds, roll);
+  return { id: `settlement_${cx}_${cy}`, cx, cy, x, y, suitability, tier };
+}
+
+// A shared derivation context: memoizes raw sites and acceptance results per
+// cell so the engine can amortize the lattice scan across many node lookups.
+// It is ONLY a cache — every value is recomputable from scratch (rebuild uses a
+// fresh ctx), which is what proves the accelerator cache is redundant.
+function makeClassCtx() {
+  return { sites: new Map(), accepted: new Map() };
+}
+function siteAt(config, cx, cy, ctx) {
+  const key = `${cx},${cy}`;
+  if (ctx.sites.has(key)) return ctx.sites.get(key);
+  const site = deriveSettlementSiteInCell(config, cx, cy);
+  ctx.sites.set(key, site);
+  return site;
+}
+
+// comparePriority — strict total order over candidate sites. Higher tier wins;
+// then higher suitability; then a deterministic cell-coordinate tiebreak (lower
+// cx, then lower cy). Returns > 0 iff `a` outranks `b`. Total + pure ⇒ the
+// Poisson-disk resolution is commutative and exploration-order-independent.
+function comparePriority(a, b) {
+  const ra = tierRank(a.tier);
+  const rb = tierRank(b.tier);
+  if (ra !== rb) return ra - rb;
+  if (a.suitability !== b.suitability) return a.suitability - b.suitability;
+  if (a.cx !== b.cx) return b.cx - a.cx;
+  return b.cy - a.cy;
+}
+
+// isSettlementSiteAccepted — PURE (given the same config). Priority-based
+// Poisson-disk: a candidate B is ACCEPTED unless some strictly-higher-priority,
+// itself-accepted candidate A lies within max(spacingOf(A), spacingOf(B)) of it.
+// Resolution follows the pure priority order, not arrival order, so the accepted
+// set is identical regardless of how a region is explored. Recursion terminates
+// because it only ever descends to strictly-higher-priority cells (a DAG down a
+// strict total order); memoized so each cell resolves once.
+export function isSettlementSiteAccepted(config, cx, cy, ctx = makeClassCtx()) {
+  const key = `${cx},${cy}`;
+  if (ctx.accepted.has(key)) return ctx.accepted.get(key);
+
+  const site = siteAt(config, cx, cy, ctx);
+  if (!site) {
+    ctx.accepted.set(key, null);
+    return null;
+  }
+
+  const r = settlementSearchCellRadius(config);
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dy = -r; dy <= r; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      const other = siteAt(config, cx + dx, cy + dy, ctx);
+      if (!other) continue;
+      if (comparePriority(other, site) <= 0) continue; // only higher priority can suppress
+      const d = Math.hypot(other.x - site.x, other.y - site.y);
+      const spacing = Math.max(settlementSpacingOf(config, other.tier), settlementSpacingOf(config, site.tier));
+      if (d < spacing && isSettlementSiteAccepted(config, cx + dx, cy + dy, ctx)) {
+        ctx.accepted.set(key, null);
+        return null;
+      }
+    }
+  }
+  ctx.accepted.set(key, site);
+  return site;
+}
+
+// deriveClassificationAt — PURE. The full classification for a node coordinate.
+// A node is a settlement iff an ACCEPTED settlement site sits within snapRadius
+// of it (a pure position test, so byte-identical however the node is reached);
+// then it carries that site's tier + id and its baseline faction. Otherwise it
+// is wilderness and carries notability + hospitability. Folded into deriveNodeAt
+// so cached nodes are self-describing and participate in the rebuildability proof.
+export function deriveClassificationAt(config, x, y, ctx = makeClassCtx()) {
+  const s = readClassification(config).settlement;
+  const cellSize = s.cellSize;
+  const { cx, cy } = cellOf(x, y, cellSize);
+
+  // Cells whose accepted site could fall within snapRadius of (x,y). snapRadius
+  // is small, but derive the ring from it so this stays correct if it grows.
+  const snapCells = Math.ceil(s.snapRadius / cellSize) + 1;
+  let claimed = null;
+  let claimedDist = s.snapRadius;
+  for (let dx = -snapCells; dx <= snapCells; dx++) {
+    for (let dy = -snapCells; dy <= snapCells; dy++) {
+      const accepted = isSettlementSiteAccepted(config, cx + dx, cy + dy, ctx);
+      if (!accepted) continue;
+      const d = Math.hypot(accepted.x - x, accepted.y - y);
+      if (d <= claimedDist) {
+        claimed = accepted;
+        claimedDist = d;
+      }
+    }
+  }
+
+  if (claimed) {
+    return {
+      kind: 'settlement',
+      tier: claimed.tier,
+      settlementId: claimed.id,
+      // Baseline faction is derived at the SITE, not the node, so every node
+      // that claims the same settlement agrees on its controlling faction.
+      baselineFaction: deriveBaselineFactionControl(config, claimed.x, claimed.y),
+      notability: null,
+      hospitability: null,
+    };
+  }
+  return {
+    kind: 'wilderness',
+    tier: null,
+    settlementId: null,
+    baselineFaction: null,
+    notability: deriveNotability(config, x, y),
+    hospitability: deriveHospitability(config, x, y),
+  };
+}
+
 // generateNeighborCandidates — PURE. Returns 8 candidate { direction, x, y }
 // positions around fromNode, one per compass heading, jittered per config. It
 // does NOT yet resolve terrain or reconciliation. Jitter is seeded from the
@@ -261,12 +569,21 @@ export function nodeIdFor(x, y) {
 }
 
 // deriveNodeAt — PURE. The full derivable node object at a coordinate (id +
-// coords + terrain), with no edges. Edges are materialization state, not a
-// property of the coordinate, so they are deliberately excluded. This is what
-// rebuildNodeAt returns, and what a cached node must match on its derivable
-// fields.
-export function deriveNodeAt(config, x, y) {
-  return { id: nodeIdFor(x, y), x, y, ...deriveTerrainAt(config, x, y) };
+// coords + terrain + classification), with no edges. Edges are materialization
+// state, not a property of the coordinate, so they are deliberately excluded.
+// This is what rebuildNodeAt returns, and what a cached node must match on its
+// derivable fields. `ctx` is an optional classification cache the engine passes
+// to amortize the settlement-lattice scan; omitting it (rebuild/proof path)
+// yields byte-identical values from a fresh scan — that equality is the proof
+// the cache is redundant.
+export function deriveNodeAt(config, x, y, ctx) {
+  return {
+    id: nodeIdFor(x, y),
+    x,
+    y,
+    ...deriveTerrainAt(config, x, y),
+    classification: deriveClassificationAt(config, x, y, ctx),
+  };
 }
 
 // findPassableOrigin — PURE. The seed node the whole graph grows from must not
@@ -306,15 +623,19 @@ function findPassableOrigin(config) {
 // and seeds a deterministic, guaranteed-passable origin node near (0, 0).
 export function createWorldMapEngine(world) {
   const { config } = world.getState();
-  readWorldMap(config); // validate up front, mirroring the other engines' guards
+  readClassification(config); // validate terrain + classification up front
 
   // The cache: nodeId -> node. A node is { id, x, y, elevation, moisture,
-  // terrainType, passable, edges: [{ to, heading, passable }] }. It is only ever
-  // an optimization over deriveNodeAt — never authoritative.
+  // terrainType, passable, classification, edges: [{ to, heading, passable }] }.
+  // It is only ever an optimization over deriveNodeAt — never authoritative.
   const nodes = new Map();
   // Node ids whose neighbors have already been materialized, so re-querying is a
   // no-op rather than a regeneration.
   const materialized = new Set();
+  // The settlement-lattice accelerator cache, shared across every node lookup so
+  // the Poisson-disk scan is amortized. Purely redundant: rebuildClassificationAt
+  // recomputes from a fresh ctx and must match (see rebuild proof).
+  const classCtx = makeClassCtx();
 
   function storeNode(node) {
     nodes.set(node.id, node);
@@ -322,7 +643,7 @@ export function createWorldMapEngine(world) {
   }
 
   function materializeNode(x, y) {
-    const derived = deriveNodeAt(config, x, y);
+    const derived = deriveNodeAt(config, x, y, classCtx);
     const existing = nodes.get(derived.id);
     if (existing) return existing;
     return storeNode({ ...derived, edges: [] });
@@ -410,11 +731,29 @@ export function createWorldMapEngine(world) {
     return findNear(x, y, readWorldMap(config).reconciliationToleranceRadius, null);
   }
 
-  // rebuildNodeAt — re-derive a node from scratch, ignoring the cache entirely.
-  // Its derivable fields must equal a cached node's; that equality is the
-  // rebuildability proof (cache is redundant over the pure derivation).
+  // rebuildNodeAt — re-derive a node from scratch, ignoring the cache entirely
+  // (fresh classification ctx too). Its derivable fields must equal a cached
+  // node's; that equality is the rebuildability proof (cache is redundant over
+  // the pure derivation).
   function rebuildNodeAt(cfg, x, y) {
     return deriveNodeAt(cfg, x, y);
+  }
+
+  // classifyAt — classify any coordinate THROUGH the shared accelerator ctx
+  // (the same cache node materialization uses). Because the ctx is only a cache
+  // over a pure derivation, the result is independent of how the ctx was warmed
+  // — that order-independence is what rebuildClassificationAt (a fresh scan)
+  // proves it equals.
+  function classifyAt(x, y) {
+    return deriveClassificationAt(config, x, y, classCtx);
+  }
+
+  // rebuildClassificationAt — re-derive just the classification from a fresh
+  // settlement-lattice scan, ignoring the shared accelerator ctx. Equality with
+  // a cached node's classification proves the accelerator cache is redundant,
+  // exactly as rebuildNodeAt does for terrain.
+  function rebuildClassificationAt(cfg, x, y) {
+    return deriveClassificationAt(cfg, x, y);
   }
 
   function getOriginNode() {
@@ -429,7 +768,9 @@ export function createWorldMapEngine(world) {
     materializeNeighbors,
     getNode,
     getNodeAt,
+    classifyAt,
     rebuildNodeAt,
+    rebuildClassificationAt,
     getOriginNode,
     isMaterialized,
   };
