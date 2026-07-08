@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ALFW Test Harness</title>
+</head>
+<body>
+<!--
+  Local-only dev tool, not part of the Perchance bundle (scripts/build.js
+  only bundles game/main.js, which never imports this file).
+
+  This must be served over a local static server, not opened as a file://
+  URL — ES module imports (used by testHarness.js) do not work over
+  file://. From the repo root, for example:
+
+    npx serve game
+    (or) python -m http.server --directory game
+
+  then open the printed localhost URL + /testHarness.html.
+-->
+<h1>ALFW Test Harness</h1>
+
+<h2>Mira &rarr; Rowan relationship</h2>
+<div id="relationship"></div>
+
+<h2>Mira's memories</h2>
+<div id="memories"></div>
+
+<h2>Actions (Rowan acts on Mira)</h2>
+<button id="btn-help">Help Mira</button>
+<button id="btn-rob">Rob Mira</button>
+<button id="btn-ignore">Ignore Mira</button>
+
+<h2>Talk to Mira</h2>
+<input id="player-input" type="text" size="60" placeholder="Say something to Mira...">
+<button id="btn-talk">Talk</button>
+<pre id="dialogue-output"></pre>
+
+<!--
+  worldState.js has an unconditional top-level `import { readFileSync } from
+  'node:fs'` (required by initWorldState(); do not touch worldState.js — see
+  scripts/nodeFsShim.js for the full explanation). scripts/build.js resolves
+  that import via an esbuild alias to nodeFsShim.js. This harness has no
+  bundler, so it does the browser-native equivalent: a plain import map,
+  remapping the same specifier to the same shim. No build step involved.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "node:fs": "../scripts/nodeFsShim.js"
+  }
+}
+</script>
+<script type="module" src="./testHarness.js"></script>
+</body>
+</html>

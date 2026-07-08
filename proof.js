@@ -19,6 +19,10 @@ import { buildDialoguePrompt } from './ai/buildDialoguePrompt.js';
 import { fallbackDialogue } from './ai/fallbackDialogue.js';
 import { createQueueManager } from './ai/queueManager.js';
 import { getDialogue } from './ai/getDialogue.js';
+import { buildSampleWorld } from './game/sampleWorld.js';
+import { createRelationshipEffectEngine } from './engines/relationshipEffectEngine.js';
+import { createMemoryEngine } from './engines/memoryEngine.js';
+import { helpNpc, robNpc, ignoreNpc } from './actions/playerActions.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
 const NPC = 'npc_mira';
@@ -456,6 +460,112 @@ const wellFormed = validateDialogueResponse({ dialogue: 'Hello there.', internal
 assert.equal(wellFormed.ok, true);
 assert.deepEqual(wellFormed.value, { dialogue: 'Hello there.', internalMonologue: 'Careful, now.', toneTags: ['guarded'] });
 console.log('Section D PASSED: fallback valid + deterministic; contract rejects missing/delta-shaped, accepts well-formed');
+
+// =============================================================================
+// Section E: player verbs -> relationship effects + auto-generated memory.
+// Uses entirely fresh buildSampleWorld() instances — never touches the
+// hand-authored mira/rowan/relationships built above, since many earlier
+// assertions already depend on their exact state.
+// =============================================================================
+console.log('\n=== Section E: player verbs, relationship effects, and memory ===');
+
+// Kept in sync by hand with engines/relationshipEffectEngine.js's ACTION_DELTAS.
+const ROBBED_DELTA = { affection: -15, comfort: -10, trust: -20, desire: 0, obedience: -5 };
+const HELPED_DELTA = { affection: 5, comfort: 3, trust: 5, desire: 0, obedience: -1 };
+const IGNORED_DELTA = { affection: -1, comfort: -1, trust: 0, desire: 0, obedience: 0 };
+
+function addStats(stats, delta) {
+  return {
+    affection: stats.affection + delta.affection,
+    comfort: stats.comfort + delta.comfort,
+    trust: stats.trust + delta.trust,
+    desire: stats.desire + delta.desire,
+    obedience: stats.obedience + delta.obedience,
+  };
+}
+
+// --- E1: ROBBED moves stats, preserves the label, drops the tier, and -------
+//         appends a memory pointing at the real dispatched entry.
+const sampleA = buildSampleWorld();
+createRelationshipEffectEngine(sampleA.world, sampleA.relationships);
+createMemoryEngine(sampleA.world, sampleA.registry);
+
+const edgeBeforeA = sampleA.relationships.getRelationship(sampleA.mira.id, sampleA.rowan.id);
+const tierBeforeA = relationshipTier(edgeBeforeA.stats);
+assert.equal(tierBeforeA, 'acquaintance', 'sanity check on the sample data\'s starting tier');
+
+const robEntry = robNpc(sampleA.world, sampleA.rowan.id, sampleA.mira.id);
+
+const edgeAfterA = sampleA.relationships.getRelationship(sampleA.mira.id, sampleA.rowan.id);
+const expectedRobbedStats = addStats(edgeBeforeA.stats, ROBBED_DELTA);
+assert.deepEqual(edgeAfterA.stats, expectedRobbedStats, 'ROBBED must apply exactly the ROBBED delta table');
+assert.equal(edgeAfterA.fromCallsTo, edgeBeforeA.fromCallsTo, 'fromCallsTo label must survive the stat rewrite');
+
+const tierAfterA = relationshipTier(edgeAfterA.stats);
+assert.equal(tierAfterA, 'stranger', 'ROBBED must drop the tier from acquaintance to stranger given the sample stats');
+
+assert.equal(sampleA.mira.psychology.memories.length, 1, 'exactly one memory must be appended');
+assert.equal(sampleA.mira.psychology.memories[0].seq, robEntry.seq, 'memory seq must point at the real dispatched entry');
+assert.equal(sampleA.mira.psychology.memories[0].summary, 'The player stole from me.');
+console.log(`E1 PASSED: ROBBED ${JSON.stringify(edgeBeforeA.stats)} -> ${JSON.stringify(edgeAfterA.stats)}, tier ${tierBeforeA} -> ${tierAfterA}, memory recorded`);
+
+// --- E2: determinism — identical action sequence on a fresh instance --------
+//         produces identical resulting stats and memories.
+const sampleB = buildSampleWorld();
+createRelationshipEffectEngine(sampleB.world, sampleB.relationships);
+createMemoryEngine(sampleB.world, sampleB.registry);
+robNpc(sampleB.world, sampleB.rowan.id, sampleB.mira.id);
+
+assert.deepEqual(
+  sampleB.relationships.getRelationship(sampleB.mira.id, sampleB.rowan.id),
+  sampleA.relationships.getRelationship(sampleA.mira.id, sampleA.rowan.id),
+  'identical action sequence on a fresh instance must produce identical relationship stats'
+);
+assert.deepEqual(
+  sampleB.mira.psychology.memories,
+  sampleA.mira.psychology.memories,
+  'identical action sequence on a fresh instance must produce identical memory entries'
+);
+console.log('E2 PASSED: determinism holds — fresh instance, same action sequence, identical stats and memories');
+
+// --- E3: HELPED applies its own delta table and memory template -------------
+const sampleC = buildSampleWorld();
+createRelationshipEffectEngine(sampleC.world, sampleC.relationships);
+createMemoryEngine(sampleC.world, sampleC.registry);
+
+const edgeBeforeC = sampleC.relationships.getRelationship(sampleC.mira.id, sampleC.rowan.id);
+const helpEntry = helpNpc(sampleC.world, sampleC.rowan.id, sampleC.mira.id);
+const edgeAfterC = sampleC.relationships.getRelationship(sampleC.mira.id, sampleC.rowan.id);
+
+assert.deepEqual(edgeAfterC.stats, addStats(edgeBeforeC.stats, HELPED_DELTA), 'HELPED must apply exactly the HELPED delta table');
+assert.equal(sampleC.mira.psychology.memories[0].seq, helpEntry.seq);
+assert.equal(sampleC.mira.psychology.memories[0].summary, 'The player helped me when I needed it.');
+console.log(`E3 PASSED: HELPED ${JSON.stringify(edgeBeforeC.stats)} -> ${JSON.stringify(edgeAfterC.stats)}, memory recorded`);
+
+// --- E4: IGNORED applies its own delta table and memory template ------------
+const sampleD = buildSampleWorld();
+createRelationshipEffectEngine(sampleD.world, sampleD.relationships);
+createMemoryEngine(sampleD.world, sampleD.registry);
+
+const edgeBeforeD = sampleD.relationships.getRelationship(sampleD.mira.id, sampleD.rowan.id);
+const ignoreEntry = ignoreNpc(sampleD.world, sampleD.rowan.id, sampleD.mira.id);
+const edgeAfterD = sampleD.relationships.getRelationship(sampleD.mira.id, sampleD.rowan.id);
+
+assert.deepEqual(edgeAfterD.stats, addStats(edgeBeforeD.stats, IGNORED_DELTA), 'IGNORED must apply exactly the IGNORED delta table');
+assert.equal(sampleD.mira.psychology.memories[0].seq, ignoreEntry.seq);
+assert.equal(sampleD.mira.psychology.memories[0].summary, 'The player brushed past without a word.');
+console.log(`E4 PASSED: IGNORED ${JSON.stringify(edgeBeforeD.stats)} -> ${JSON.stringify(edgeAfterD.stats)}, memory recorded`);
+
+// --- E5: memoryEngine no-ops (never throws) for an unregistered target ------
+const sampleE = buildSampleWorld();
+createRelationshipEffectEngine(sampleE.world, sampleE.relationships);
+createMemoryEngine(sampleE.world, sampleE.registry);
+assert.doesNotThrow(() => {
+  helpNpc(sampleE.world, sampleE.rowan.id, 'npc_unregistered');
+}, 'dispatching against an unregistered target id must not throw');
+console.log('E5 PASSED: unregistered target id is a defensive no-op, no crash');
+
+console.log('\nSection E PASSED: player verbs deterministically move relationship stats and auto-generate memories');
 
 assert.equal(unhandledRejections.length, 0, 'no unhandled rejection may have occurred anywhere');
 
