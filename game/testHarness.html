@@ -3,11 +3,36 @@
 <head>
 <meta charset="utf-8">
 <title>ALFW Test Harness</title>
+</head>
+<body>
+<!--
+  Dual-purpose file:
+
+  1. Local dev: open this via a local static server (not file:// — ES module
+     imports below are blocked under file://), e.g. from the repo root:
+       npx serve game
+       (or) python -m http.server --directory game
+     then open the printed localhost URL + /testHarness.html.
+
+  2. Source for the Perchance bundle: scripts/build.js's entry point is
+     game/testHarness.js, and it splices the markup between the
+     PERCHANCE-BUNDLE markers below out of THIS file, then appends the
+     bundled script — producing one self-contained artifact to paste into
+     Perchance's html panel. Do not put a <script> tag inside the marked
+     block; the build appends its own bundled one after it. The import-map
+     + module-script wiring at the bottom of <body> is local-dev-only and is
+     deliberately outside the marked block, since the Perchance bundle
+     inlines everything at build time instead.
+-->
+<!-- PERCHANCE-BUNDLE:BEGIN -->
 <style>
   /* Presentation-only: readability for a debug harness, not a product screen.
      Dark bg / light text so this is legible during long test sessions. Each
      panel gets its own accent color so "player action" vs "debug-only time
-     control" is distinguishable at a glance, not just by reading the text. */
+     control" is distinguishable at a glance, not just by reading the text.
+     Lives in <body> (not <head>) so it survives the PERCHANCE-BUNDLE splice —
+     <style> is valid anywhere in body content, and this whole marked block
+     gets lifted as-is into the Perchance bundle by scripts/build.js. */
   :root {
     --bg: #121212;
     --panel: #1b1b1f;
@@ -84,23 +109,8 @@
   ul { margin: 0.25rem 0; padding-left: 1.25rem; }
   li { margin: 0.15rem 0; }
 </style>
-</head>
-<body>
-<!--
-  Local-only dev tool, not part of the Perchance bundle (scripts/build.js
-  only bundles game/main.js, which never imports this file).
-
-  This must be served over a local static server, not opened as a file://
-  URL — ES module imports (used by testHarness.js) do not work over
-  file://. From the repo root, for example:
-
-    npx serve game
-    (or) python -m http.server --directory game
-
-  then open the printed localhost URL + /testHarness.html.
--->
 <h1>ALFW Test Harness</h1>
-<p class="subtitle">Local-only dev tool — not part of the Perchance bundle.</p>
+<p class="subtitle">Runs standalone: pasted into Perchance's html panel, or served locally for dev.</p>
 
 <div class="panel panel-clock">
   <h2>World clock</h2>
@@ -148,14 +158,18 @@
   <button id="btn-talk">Talk</button>
   <pre id="dialogue-output"></pre>
 </div>
+<!-- PERCHANCE-BUNDLE:END -->
 
 <!--
-  worldState.js has an unconditional top-level `import { readFileSync } from
-  'node:fs'` (required by initWorldState(); do not touch worldState.js — see
+  Local-dev-only wiring below (NOT part of the Perchance splice): loads
+  testHarness.js as a real ES module via a local static server. worldState.js
+  has an unconditional top-level `import { readFileSync } from 'node:fs'`
+  (required by initWorldState(); do not touch worldState.js — see
   scripts/nodeFsShim.js for the full explanation). scripts/build.js resolves
-  that import via an esbuild alias to nodeFsShim.js. This harness has no
-  bundler, so it does the browser-native equivalent: a plain import map,
-  remapping the same specifier to the same shim. No build step involved.
+  that import via an esbuild alias to nodeFsShim.js when it bundles
+  testHarness.js for Perchance; this harness has no bundler at dev time, so it
+  does the browser-native equivalent here: a plain import map, remapping the
+  same specifier to the same shim.
 -->
 <script type="importmap">
 {

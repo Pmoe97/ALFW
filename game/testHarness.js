@@ -1,10 +1,19 @@
-// game/testHarness.js — local-only dev tool, NOT part of the Perchance
-// bundle. scripts/build.js has a single explicit entry point (game/main.js)
-// and never imports this file, so it can never end up in the bundle.
+// game/testHarness.js — dual-purpose: local dev tool AND the source
+// scripts/build.js bundles for Perchance. Its entry point is this file; the
+// build splices testHarness.html's PERCHANCE-BUNDLE-marked markup out and
+// prepends it to this file's esbuild output, producing one self-contained
+// paste for Perchance's html panel.
 //
-// This must be loaded via a local static server (e.g. `npx serve game` or
-// `python -m http.server --directory game`), not opened as a file:// URL —
-// ES module imports are blocked under file://.
+// For local dev, this must be loaded via a local static server (e.g.
+// `npx serve game` or `python -m http.server --directory game`), not opened
+// as a file:// URL — ES module imports are blocked under file://. The
+// Perchance bundle sidesteps this entirely since esbuild inlines every
+// import into a single non-module IIFE at build time.
+//
+// Every DOM lookup below (getElementById etc.) assumes the harness's own
+// markup already exists in the page — true locally (testHarness.html) and
+// true in the Perchance bundle (the spliced markup is placed before this
+// script in the output, so the browser has already parsed it in).
 
 import { buildSampleWorld } from './sampleWorld.js';
 import { createRelationshipEffectEngine } from '../engines/relationshipEffectEngine.js';

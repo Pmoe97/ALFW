@@ -1,12 +1,13 @@
-// game/main.js — smoke-test entry point for the Perchance bundle.
-//
-// This is NOT a game loop and NOT UI — it's the minimal proof-of-life that
-// gets bundled and pasted into Perchance's master HTML panel. It builds a
-// world, the same hand-authored Mira/Rowan pair proof.js uses, wires their
-// relationship, and makes one real getDialogue() call — the console output
-// is how the author hand-verifies the live AI path once this is pasted into
-// an actual Perchance page (something node proof.js can never do, since the
-// real generateText plugin only exists there).
+// game/main.js — minimal console-only smoke test, NOT wired to
+// scripts/build.js by default (that now bundles game/testHarness.js, the
+// full interactive harness, for Perchance — see its header comment). This
+// file is kept as a smaller manual alternative: it builds a world, the same
+// hand-authored Mira/Rowan pair proof.js uses, wires their relationship, and
+// makes one real getDialogue() call — the console output is how the author
+// hand-verifies the live AI path if this is bundled and pasted into an
+// actual Perchance page (something node proof.js can never do, since the
+// real generateText plugin only exists there). To use it instead of the
+// harness, point scripts/build.js's entryPoints back at this file.
 
 import { buildSampleWorld } from './sampleWorld.js';
 import { getDialogue } from '../ai/getDialogue.js';
