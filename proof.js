@@ -4,7 +4,9 @@
 //
 // Proves: the single dispatch/subscribe channel works, the event log is
 // append-only and immutable, derived reputation is a view over the log,
-// and the whole thing is deterministic.
+// and the whole thing is deterministic. Then the AI voice layer: prompt
+// assembly, queue-manager scheduling, stubbed transport plumbing, and the
+// fallback + response contract (real AI only exists in a Perchance page).
 
 import assert from 'node:assert/strict';
 import { initWorldState } from './worldState.js';
@@ -12,6 +14,11 @@ import { createFarmEngine } from './engines/farmEngine.js';
 import { createReputationEngine } from './engines/reputationEngine.js';
 import { createPlayer, createNpc, effectiveSkill } from './entities/entitySchema.js';
 import { createRelationshipStore, relationshipTier } from './entities/relationshipStore.js';
+import { validateDialogueResponse } from './ai/responseContract.js';
+import { buildDialoguePrompt } from './ai/buildDialoguePrompt.js';
+import { fallbackDialogue } from './ai/fallbackDialogue.js';
+import { createQueueManager } from './ai/queueManager.js';
+import { getDialogue } from './ai/getDialogue.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
 const NPC = 'npc_mira';
@@ -263,4 +270,197 @@ assert.equal(childSide.relation, 'child');
 assert.equal(parentSide.relation, 'parent');
 console.log('Auto-inverse check PASSED: the reverse family tie is queryable without a second setFamilyTie() call');
 
+// =============================================================================
+// AI voice layer + queue manager (ai/). Everything below is deterministic or
+// synthetic — the real generateText plugin only exists inside a live
+// Perchance page and can never be exercised from Node. Synthetic delays are
+// tens of milliseconds; total added runtime stays under ~2 seconds.
+// =============================================================================
+
+// Any unhandled rejection anywhere below is a hard failure — the queue
+// manager's core promise is that absorbed late settlements never produce one.
+const unhandledRejections = [];
+process.on('unhandledRejection', (err) => unhandledRejections.push(err));
+
+// --- Section A: prompt assembly (strict) -------------------------------------
+console.log('\n=== Section A: prompt assembly ===');
+
+mira.psychology.flags.aiDirectives.push('Never reveal the size of the tavern strongbox.');
+const miraToRowanEdge = relationships.getRelationship(mira.id, rowan.id);
+const samplePlayerLine = 'Evening, Mira. Any rooms free tonight?';
+
+const prompt = buildDialoguePrompt(mira, miraToRowanEdge, mira.psychology.memories, samplePlayerLine);
+console.log(prompt);
+
+assert.ok(prompt.includes('Mira Thistledown'), 'prompt must contain the identity name');
+assert.ok(prompt.includes(relationshipTier(miraToRowanEdge.stats)), 'prompt must contain the derived tier label');
+assert.ok(prompt.includes('"traveler"'), 'prompt must contain fromCallsTo from the npc->player edge');
+assert.ok(prompt.includes('Never reveal the size of the tavern strongbox.'), 'prompt must contain the aiDirective verbatim');
+assert.ok(prompt.includes(mira.psychology.memories[0].summary), 'prompt must contain the memory summary');
+assert.ok(prompt.includes('Return ONLY valid JSON matching this exact shape'), 'prompt must contain the JSON-only instruction');
+
+// Determinism: byte-identical on a second build with the same inputs.
+const promptAgain = buildDialoguePrompt(mira, miraToRowanEdge, mira.psychology.memories, samplePlayerLine);
+assert.equal(prompt, promptAgain);
+console.log('\nSection A PASSED: all required parts present, assembly deterministic');
+
+// --- Section B: queue manager correctness (synthetic, no real AI) ------------
+console.log('\n=== Section B: queue manager correctness ===');
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+const qm = createQueueManager(); // text: maxConcurrent 9, backgroundCap ceil(9/3) = 3
+
+// B1: saturate background past its cap — active background never exceeds 3.
+const bgDeferreds = [];
+const bgPromises = [];
+for (let i = 0; i < 6; i++) {
+  const d = deferred();
+  bgDeferreds.push(d);
+  bgPromises.push(qm.enqueue({ type: 'text', category: 'background', run: () => d.promise }));
+  assert.ok(qm.getCounts('text').activeBackground <= 3, 'background must never exceed its hard cap');
+}
+assert.equal(qm.getCounts('text').activeBackground, 3);
+assert.equal(qm.getCounts('text').pendingBackground, 3);
+console.log('B1 PASSED: background active count capped at 3 with 6 enqueued');
+
+// B2: with background saturated at its cap, a foreground request for the same
+// type is admitted immediately — it never waits on background.
+const fgDeferred = deferred();
+const fgPromise = qm.enqueue({ type: 'text', category: 'foreground', run: () => fgDeferred.promise });
+assert.equal(qm.getCounts('text').activeForeground, 1, 'foreground must be admitted immediately past a saturated background cap');
+console.log('B2 PASSED: foreground admitted immediately while background is saturated');
+
+// B3: while the cap is saturated, enqueue background requests with different
+// priorities; freeing one slot must admit the highest-priority pending one.
+const startedOrder = [];
+function trackedBackground(tag, priority) {
+  const d = deferred();
+  const promise = qm.enqueue({
+    type: 'text',
+    category: 'background',
+    priority,
+    run: () => { startedOrder.push(tag); return d.promise; },
+  });
+  return { d, promise };
+}
+const lowPriority = trackedBackground('low', 1);
+const highPriority = trackedBackground('high', 5);
+const midPriority = trackedBackground('mid', 3);
+assert.equal(startedOrder.length, 0, 'none of the tracked requests may start while the cap is saturated');
+
+bgDeferreds[0].resolve('freed');
+await bgPromises[0]; // by now the freed slot has been re-drained
+assert.deepEqual(startedOrder, ['high'], 'the highest-priority pending background request must be admitted next');
+console.log('B3 PASSED: freed slot went to the highest-priority pending request');
+
+// Drain everything from B1-B3 so later checks start from an idle queue.
+for (const d of [...bgDeferreds.slice(1), lowPriority.d, highPriority.d, midPriority.d, fgDeferred]) d.resolve('done');
+await Promise.all([...bgPromises, lowPriority.promise, highPriority.promise, midPriority.promise, fgPromise]);
+assert.deepEqual(qm.getCounts('text'), { activeForeground: 0, activeBackground: 0, pendingForeground: 0, pendingBackground: 0 });
+
+// B4: timeout + fallbackValue. Representative of a cheap formulaic background
+// call — e.g. a future relationship-delta scorer that should fall back to a
+// neutral default like [1,1,1,1,1] rather than block on a slow response.
+// (That scorer does not exist; this proves the mechanism, not the feature.)
+const timeoutStart = Date.now();
+const slowResolving = new Promise((res) => setTimeout(() => res('late-real-value'), 300));
+const timedOutResult = await qm.enqueue({
+  type: 'text',
+  category: 'background',
+  run: () => slowResolving,
+  timeoutMs: 60,
+  fallbackValue: [1, 1, 1, 1, 1],
+});
+const timeoutElapsed = Date.now() - timeoutStart;
+assert.ok(timeoutElapsed < 250, `must resolve at ~timeoutMs, not the slow 300ms duration (took ${timeoutElapsed}ms)`);
+assert.equal(timedOutResult.usedFallback, true);
+assert.equal(timedOutResult.timedOut, true);
+assert.deepEqual(timedOutResult.result, [1, 1, 1, 1, 1]);
+
+// A slow REJECTION after timeout is the dangerous case for unhandled
+// rejections — enqueue one of those too.
+const slowRejecting = new Promise((_, rej) => setTimeout(() => rej(new Error('late failure')), 200));
+const rejectedAfterTimeout = await qm.enqueue({
+  type: 'text',
+  category: 'background',
+  run: () => slowRejecting,
+  timeoutMs: 60,
+  fallbackValue: 'neutral',
+});
+assert.equal(rejectedAfterTimeout.usedFallback, true);
+
+// Let both slow promises actually settle, then confirm the late settlements
+// were absorbed: no unhandled rejection, already-returned results untouched.
+await new Promise((res) => setTimeout(res, 400));
+assert.equal(unhandledRejections.length, 0, 'late settlements must never produce an unhandled rejection');
+assert.deepEqual(timedOutResult.result, [1, 1, 1, 1, 1], 'the late real resolution must not affect the returned result');
+console.log('B4 PASSED: resolved with fallback at ~timeoutMs; late real settlements absorbed safely');
+
+// B5: no timeoutMs genuinely waits for the real result instead of failing early.
+const waitStart = Date.now();
+const waitedResult = await qm.enqueue({
+  type: 'text',
+  category: 'foreground',
+  run: () => new Promise((res) => setTimeout(() => res('real-result'), 50)),
+});
+assert.equal(waitedResult.result, 'real-result');
+assert.equal(waitedResult.usedFallback, false);
+assert.ok(Date.now() - waitStart >= 45, 'a request without timeoutMs must wait for run() to settle');
+console.log('B5 PASSED: no-timeout request waited for and returned the real result');
+
+// --- Section C: transport plumbing (stubbed) ----------------------------------
+// The real generateText global only exists inside a live Perchance page. This
+// stub proves OUR plumbing end-to-end — availability detection, queue
+// admission, call, parse, validate — and says nothing about real AI output
+// quality, which can only ever be verified by hand in a Perchance page.
+console.log('\n=== Section C: transport plumbing (stubbed generateText) ===');
+
+globalThis.generateText = async () =>
+  '{"dialogue": "Aye, one room left — mind the creaky third stair.", "internalMonologue": "He looks road-worn. Good coin, though.", "toneTags": ["warm", "wry"]}';
+
+const liveResult = await getDialogue(mira, miraToRowanEdge, mira.psychology.memories, samplePlayerLine);
+assert.equal(liveResult.source, 'ai', 'with a working stub the live AI path must be taken');
+assert.equal(validateDialogueResponse(liveResult.response).ok, true, 'the returned response must satisfy the contract');
+assert.ok(liveResult.response.dialogue.includes('creaky third stair'), 'the stubbed dialogue must round-trip intact');
+console.log(`stubbed AI path returned: "${liveResult.response.dialogue}"`);
+
+// Restore a clean plugin-unavailable state and prove the fallback path takes over.
+delete globalThis.generateText;
+const unavailableResult = await getDialogue(mira, miraToRowanEdge, mira.psychology.memories, samplePlayerLine);
+assert.equal(unavailableResult.source, 'fallback', 'without the plugin, getDialogue must degrade to the fallback');
+console.log('Section C PASSED: stubbed plumbing works end-to-end; plugin-unavailable degrades cleanly');
+
+// --- Section D: fallback + contract enforcement (zero network) ---------------
+console.log('\n=== Section D: fallback + contract enforcement ===');
+
+const fallbackResult = fallbackDialogue(mira, miraToRowanEdge);
+assert.equal(validateDialogueResponse(fallbackResult).ok, true, 'fallbackDialogue must produce a contract-valid response');
+assert.ok(fallbackResult.dialogue.trim().length > 0);
+assert.deepEqual(fallbackDialogue(mira, miraToRowanEdge), fallbackResult, 'fallback must be deterministic: same entity + tier -> same line');
+console.log(`fallback line for Mira: "${fallbackResult.dialogue}" [${fallbackResult.toneTags.join(', ')}]`);
+
+const missingDialogue = validateDialogueResponse({ internalMonologue: 'hm' });
+assert.equal(missingDialogue.ok, false);
+assert.ok(missingDialogue.reason.includes('dialogue'), 'missing dialogue must be the stated reason');
+
+const deltaShaped = validateDialogueResponse({ dialogue: 'hi', trustDelta: 5 });
+assert.equal(deltaShaped.ok, false);
+assert.ok(deltaShaped.reason.includes('state-write-shaped'), 'a delta-shaped key must be rejected AS a state-write-shaped field');
+
+const wellFormed = validateDialogueResponse({ dialogue: 'Hello there.', internalMonologue: 'Careful, now.', toneTags: ['guarded'] });
+assert.equal(wellFormed.ok, true);
+assert.deepEqual(wellFormed.value, { dialogue: 'Hello there.', internalMonologue: 'Careful, now.', toneTags: ['guarded'] });
+console.log('Section D PASSED: fallback valid + deterministic; contract rejects missing/delta-shaped, accepts well-formed');
+
+assert.equal(unhandledRejections.length, 0, 'no unhandled rejection may have occurred anywhere');
+
+// Covers every deterministic/synthetic check above: prompt-assembly
+// determinism, the five queue-manager correctness properties, the stubbed
+// transport plumbing, and fallback + contract enforcement. Real live-AI
+// verification can only happen by hand inside an actual Perchance page.
 console.log('\nALL CHECKS PASSED');
