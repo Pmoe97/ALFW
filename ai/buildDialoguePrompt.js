@@ -66,6 +66,11 @@ export function buildDialoguePrompt(entity, relationship, recentMemories, player
   // down, and the two never merge.
   lines.push('== Voice (speak this way) ==');
   lines.push(`Accent: ${psychology.voice.accent}`);
+  if (psychology.voice.phrases && psychology.voice.phrases.length > 0) {
+    lines.push(
+      `Favors words/phrases like: ${psychology.voice.phrases.join(', ')} — speak in that general register, using similar words in that style as natural, not limited to only this list.`
+    );
+  }
   for (const directive of psychology.voice.directives) {
     lines.push(`- ALWAYS: ${directive}`);
   }

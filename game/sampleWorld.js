@@ -133,7 +133,11 @@ const WORLD_CONFIG = {
         axisPriors: { extraversion: 5, agreeableness: 5, conscientiousness: 5, dominance: 5, openness: 5 },
         appearanceOverrides: {},
         appearanceExtensions: {},
-        voiceAccents: ['Vale Country', 'Northmarch', 'Aldervale dockside'],
+        voiceAccents: [
+          { name: 'Vale Country', signaturePhrases: ['reckon', 'much obliged', 'settle up', 'mind yourself', 'no trouble at all', 'there now'] },
+          { name: 'Northmarch', signaturePhrases: ["fair enough", "won't lie", 'long as it keeps', 'obliged', 'no matter', 'canny'] },
+          { name: 'Aldervale dockside', signaturePhrases: ['savvy?', 'aye', 'square deal', 'keep your coin', 'watch yourself', 'reckon so'] },
+        ],
       },
       elf: {
         displayName: 'Elf',
@@ -154,7 +158,10 @@ const WORLD_CONFIG = {
         appearanceExtensions: {
           ears: ['long pointed', 'swept pointed', 'short pointed'],
         },
-        voiceAccents: ['old-court lilt', 'forest-quiet cadence'],
+        voiceAccents: [
+          { name: 'old-court lilt', signaturePhrases: ['if it pleases', 'indeed', 'one does not simply', 'as the old songs say', 'in due season'] },
+          { name: 'forest-quiet cadence', signaturePhrases: ['the wood remembers', 'softly now', 'let it pass', 'in time', 'so it is'] },
+        ],
       },
       dwarf: {
         displayName: 'Dwarf',
@@ -174,7 +181,9 @@ const WORLD_CONFIG = {
         appearanceExtensions: {
           beardStyle: ['long braided beard', 'forked beard with rings', 'short cropped beard', 'elaborately knotted beard'],
         },
-        voiceAccents: ['mountain-hall burr'],
+        voiceAccents: [
+          { name: 'mountain-hall burr', signaturePhrases: ['by the deep stone', 'aye, well enough', 'mind the vein', 'steady now', 'worth its weight', 'hold fast'] },
+        ],
       },
       orc: {
         displayName: 'Orc',
@@ -194,7 +203,9 @@ const WORLD_CONFIG = {
         appearanceExtensions: {
           tusks: ['small lower tusks', 'prominent lower tusks', 'one chipped tusk', 'capped tusks'],
         },
-        voiceAccents: ['clipped war-camp cant'],
+        voiceAccents: [
+          { name: 'clipped war-camp cant', signaturePhrases: ['move', 'done', 'hold the line', 'no excuses', 'again', 'stand'] },
+        ],
       },
       halfling: {
         displayName: 'Halfling',
@@ -212,7 +223,9 @@ const WORLD_CONFIG = {
           heightBuild: ['very short and round-cheeked', 'small and light-footed', 'tiny, plump and quick'],
         },
         appearanceExtensions: {},
-        voiceAccents: ['warm hearthside drawl'],
+        voiceAccents: [
+          { name: 'warm hearthside drawl', signaturePhrases: ['bless you', 'sit a spell', 'eat something first', 'no need to fuss', "there's plenty", 'hush now'] },
+        ],
       },
       gnome: {
         displayName: 'Gnome',
@@ -230,7 +243,9 @@ const WORLD_CONFIG = {
           heightBuild: ['tiny and wiry', 'very small, quick-fingered', 'diminutive, always in motion'],
         },
         appearanceExtensions: {},
-        voiceAccents: ['rapid workshop patter'],
+        voiceAccents: [
+          { name: 'rapid workshop patter', signaturePhrases: ['quick quick', 'one more tweak', 'nearly there', 'hand me that', 'brilliant, brilliant', 'just a spark of it'] },
+        ],
       },
       dragonborn: {
         displayName: 'Dragonborn',
@@ -252,7 +267,9 @@ const WORLD_CONFIG = {
           hornStyle: ['swept-back horns', 'short curved horns', 'crowned ridge of horns'],
           tailShape: ['long tapering tail', 'thick blunt tail', 'short spined tail'],
         },
-        voiceAccents: ['resonant clan-hall formality'],
+        voiceAccents: [
+          { name: 'resonant clan-hall formality', signaturePhrases: ['by clan and creed', 'it is decided', 'honor demands it', 'so the elders taught', 'let it be known', 'with due respect'] },
+        ],
       },
     },
   },
@@ -309,6 +326,7 @@ export function buildSampleWorld() {
           'Stay warm underneath, even when your patience is running short.',
           'Keep it short and get to what someone actually needs.',
         ],
+        phrases: ['reckon', 'no trouble at all', 'mind yourself', 'settle up', 'there now'],
       },
       memories: [], // no farm engine here (unlike proof.js), so nothing points at a real event-log entry
       flags: { personality: ['stubborn'], condition: [], aiDirectives: [] },
@@ -376,6 +394,7 @@ export function buildSampleWorld() {
           'Say little; keep replies terse and understated.',
           'Lean dry and wry rather than warm.',
         ],
+        phrases: ['fair enough', "won't lie", 'no matter', 'obliged', 'long as it keeps'],
       },
       memories: [],
       flags: { personality: ['wary of strangers'], condition: [], aiDirectives: [] },
@@ -439,6 +458,7 @@ export function buildSampleWorld() {
           'Volunteer plenty of words; fill a silence before it fills itself.',
           'Keep real warmth under the banter, even while you are deflecting.',
         ],
+        phrases: ['no kidding', 'square deal', "don't test me", 'keep your coin', "deal's a deal"],
       },
       memories: [], // no farm engine here (unlike proof.js), so nothing points at a real event-log entry
       flags: {
