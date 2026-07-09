@@ -84,8 +84,9 @@ function nodeKeys(node) {
 // only as deterministic as that order: callers pass a stably-ordered array —
 // availableCategories sorts by name (never JSON/insertion order), and the POI-id
 // pick uses the stable pool order. Assumes a non-empty array with positive total
-// weight.
-function weightedPick(entries, r) {
+// weight. Exported for reuse by npcGeneratorEngine (race and orientation picks) —
+// pure-helper sharing, same as this module's own imports from worldMapEngine.
+export function weightedPick(entries, r) {
   const total = entries.reduce((sum, e) => sum + e.weight, 0);
   let acc = r * total;
   for (const e of entries) {

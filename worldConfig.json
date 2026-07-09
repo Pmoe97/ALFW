@@ -111,6 +111,162 @@
       "explore": {
         "baseExploreSuccessChance": 0.75
       }
+    },
+    "population": {
+      "settlement": {
+        "populationByTier": {
+          "hamlet": 6,
+          "village": 12,
+          "town": 24,
+          "city": 40,
+          "capital": 60
+        }
+      },
+      "wilderness": {
+        "base": -1,
+        "notabilityPopScale": 4,
+        "hospitabilityPopScale": 2.5,
+        "maxPopulation": 6
+      }
+    }
+  },
+  "raceRegistry": {
+    "races": {
+      "human": {
+        "displayName": "Human",
+        "enabled": true,
+        "weight": 10,
+        "genders": ["female", "male"],
+        "namePool": {
+          "female": ["Tessa", "Wren", "Ida", "Maren", "Elsbeth", "Junia", "Roslyn", "Ada"],
+          "male": ["Bram", "Cole", "Edric", "Tomas", "Garrin", "Hale", "Osric", "Piers"]
+        },
+        "surnames": ["Thistledown", "Ashvale", "Copperfield", "Marsh", "Weatherby", "Stroud", "Fenwick", "Harrow"],
+        "ageRange": { "min": 18, "max": 70 },
+        "axisPriors": { "extraversion": 5, "agreeableness": 5, "conscientiousness": 5, "dominance": 5, "openness": 5 },
+        "appearanceOverrides": {},
+        "appearanceExtensions": {},
+        "voiceAccents": ["Vale Country", "Northmarch", "Aldervale dockside"]
+      },
+      "elf": {
+        "displayName": "Elf",
+        "enabled": true,
+        "weight": 3,
+        "genders": ["female", "male"],
+        "namePool": {
+          "female": ["Lirael", "Aerith", "Sylune", "Naivara", "Keyleth", "Thessaly"],
+          "male": ["Aelar", "Caelith", "Varis", "Erevan", "Soveliss", "Thamior"]
+        },
+        "surnames": ["Silverbough", "Dawnwhisper", "Moonbrook", "Gladesong", "Wyndrunner", "Starfall"],
+        "ageRange": { "min": 30, "max": 400 },
+        "axisPriors": { "extraversion": 3, "agreeableness": 6, "conscientiousness": 6, "dominance": 4, "openness": 7 },
+        "appearanceOverrides": {
+          "skin.tone": ["pale", "porcelain", "golden", "moon-grey"],
+          "hair.color": ["silver", "white-gold", "black", "copper"]
+        },
+        "appearanceExtensions": {
+          "ears": ["long pointed", "swept pointed", "short pointed"]
+        },
+        "voiceAccents": ["old-court lilt", "forest-quiet cadence"]
+      },
+      "dwarf": {
+        "displayName": "Dwarf",
+        "enabled": true,
+        "weight": 3,
+        "genders": ["female", "male"],
+        "namePool": {
+          "female": ["Helga", "Brunhild", "Dagny", "Sigrid", "Astrid", "Torhild"],
+          "male": ["Borin", "Thrain", "Durgan", "Keldan", "Morgrim", "Ulfgar"]
+        },
+        "surnames": ["Ironvein", "Stonehelm", "Coppergrip", "Deepdelver", "Anvilmark", "Granitebrow"],
+        "ageRange": { "min": 25, "max": 250 },
+        "axisPriors": { "extraversion": 4, "agreeableness": 4, "conscientiousness": 8, "dominance": 6, "openness": 3 },
+        "appearanceOverrides": {
+          "heightBuild": ["short and barrel-chested", "short, broad and heavy-set", "stocky, dense with muscle"]
+        },
+        "appearanceExtensions": {
+          "beardStyle": ["long braided beard", "forked beard with rings", "short cropped beard", "elaborately knotted beard"]
+        },
+        "voiceAccents": ["mountain-hall burr"]
+      },
+      "orc": {
+        "displayName": "Orc",
+        "enabled": true,
+        "weight": 2,
+        "genders": ["female", "male"],
+        "namePool": {
+          "female": ["Gorza", "Sharn", "Ulka", "Vresh", "Karga", "Zetha"],
+          "male": ["Marruk", "Ghor", "Krag", "Uzek", "Thok", "Varg"]
+        },
+        "surnames": ["Bloodfang", "Ironhide", "Skullsplitter", "Ashmaw", "Stonejaw", "Redtusk"],
+        "ageRange": { "min": 18, "max": 55 },
+        "axisPriors": { "extraversion": 6, "agreeableness": 3, "conscientiousness": 4, "dominance": 8, "openness": 4 },
+        "appearanceOverrides": {
+          "skin.tone": ["moss green", "grey-green", "olive-drab", "deep jade"]
+        },
+        "appearanceExtensions": {
+          "tusks": ["small lower tusks", "prominent lower tusks", "one chipped tusk", "capped tusks"]
+        },
+        "voiceAccents": ["clipped war-camp cant"]
+      },
+      "halfling": {
+        "displayName": "Halfling",
+        "enabled": true,
+        "weight": 2,
+        "genders": ["female", "male"],
+        "namePool": {
+          "female": ["Rosie", "Marigold", "Pearl", "Tilly", "Nora", "Posy"],
+          "male": ["Milo", "Alton", "Corrin", "Wendel", "Perrin", "Odo"]
+        },
+        "surnames": ["Underhill", "Goodbarrel", "Tealeaf", "Brushgather", "Thorngage", "Greenbottle"],
+        "ageRange": { "min": 20, "max": 100 },
+        "axisPriors": { "extraversion": 6, "agreeableness": 7, "conscientiousness": 5, "dominance": 2, "openness": 4 },
+        "appearanceOverrides": {
+          "heightBuild": ["very short and round-cheeked", "small and light-footed", "tiny, plump and quick"]
+        },
+        "appearanceExtensions": {},
+        "voiceAccents": ["warm hearthside drawl"]
+      },
+      "gnome": {
+        "displayName": "Gnome",
+        "enabled": true,
+        "weight": 1,
+        "genders": ["female", "male"],
+        "namePool": {
+          "female": ["Nix", "Ellywick", "Tana", "Zanna", "Breena", "Lorilla"],
+          "male": ["Fizwick", "Boddynock", "Dimble", "Glim", "Namfoodle", "Zook"]
+        },
+        "surnames": ["Sparkgear", "Timbertink", "Cogwhistle", "Nimbleknob", "Brassbolt", "Fiddlefen"],
+        "ageRange": { "min": 25, "max": 200 },
+        "axisPriors": { "extraversion": 5, "agreeableness": 6, "conscientiousness": 4, "dominance": 3, "openness": 9 },
+        "appearanceOverrides": {
+          "heightBuild": ["tiny and wiry", "very small, quick-fingered", "diminutive, always in motion"]
+        },
+        "appearanceExtensions": {},
+        "voiceAccents": ["rapid workshop patter"]
+      },
+      "dragonborn": {
+        "displayName": "Dragonborn",
+        "enabled": true,
+        "weight": 1,
+        "genders": ["female", "male"],
+        "namePool": {
+          "female": ["Akra", "Sora", "Kava", "Mishann", "Nala", "Perra"],
+          "male": ["Balasar", "Kriv", "Rhogar", "Torinn", "Medrash", "Arjhan"]
+        },
+        "surnames": ["Flamecrest", "Emberscale", "Stormwing", "Ashborn", "Cinderfang", "Duskscale"],
+        "ageRange": { "min": 18, "max": 60 },
+        "axisPriors": { "extraversion": 5, "agreeableness": 4, "conscientiousness": 6, "dominance": 7, "openness": 5 },
+        "appearanceOverrides": {
+          "skin.texture": ["fine overlapping scales", "coarse ridged scales", "smooth polished scales"]
+        },
+        "appearanceExtensions": {
+          "scaleColor": ["bronze", "crimson", "cobalt", "jade", "obsidian", "gold"],
+          "hornStyle": ["swept-back horns", "short curved horns", "crowned ridge of horns"],
+          "tailShape": ["long tapering tail", "thick blunt tail", "short spined tail"]
+        },
+        "voiceAccents": ["resonant clan-hall formality"]
+      }
     }
   }
 }
