@@ -1,15 +1,18 @@
 // game/sampleWorld.js — shared sample-world construction.
 //
-// Pure, silent construction (no console output) of the hand-authored
-// Mira/Rowan/Sable trio and their relationships, shared by game/main.js,
-// game/testHarness.js, and proof.js so none of them duplicate this data a
-// third time.
+// Pure, silent construction (no console output, except the one loud warning
+// below when a loaded save's config has drifted from the shipped one) of the
+// hand-authored Mira/Rowan/Sable trio and their relationships, shared by
+// game/main.js, game/testHarness.js, and proof.js so none of them duplicate
+// this data a third time.
 
 import { createWorldState } from '../worldState.js';
 import { createNpc, createPlayer } from '../entities/entitySchema.js';
 import { createRelationshipStore } from '../entities/relationshipStore.js';
 import { createEntityRegistry } from '../entities/entityRegistry.js';
 import { createRaceRegistry } from '../entities/raceRegistry.js';
+import { diffConfigKeys } from './saveLoad.js';
+import { log } from '../debugLog.js';
 
 // Mirrors worldConfig.json — keep these two in sync by hand. createWorldState()
 // (not initWorldState()) is used deliberately: this runs in a browser/
@@ -285,7 +288,26 @@ const WORLD_CONFIG = {
 //   - each engine primes its cache from the log it finds at construction;
 //   - the seed DISPATCHES are skipped — those events are already in the saved
 //     log, and re-dispatching them would double history.
+//
+// CONFIG DRIFT: a save always replays under its OWN embedded config, never
+// the currently-shipped WORLD_CONFIG — that is the entire point of embedding
+// it (a future retune must not silently change what an old save replays
+// into). If the two have drifted, that is still worth knowing about, so it is
+// logged as a loud, non-fatal warning naming the differing top-level keys —
+// never a load-time throw, which would brick every existing save the moment
+// the shipped config changes at all.
 export function buildSampleWorld({ save } = {}) {
+  if (save) {
+    const drift = diffConfigKeys(WORLD_CONFIG, save.config);
+    if (drift.length > 0) {
+      log(
+        'SaveLoad',
+        `WARNING: this save's config differs from the currently-shipped config in: ${drift.join(', ')}. ` +
+          `Replaying under the SAVE's own config (as it must, for correct replay) — the shipped values are NOT applied.`
+      );
+    }
+  }
+
   const world = createWorldState(save?.config ?? WORLD_CONFIG, save?.eventLog ?? []);
 
   // The live race registry (settings surface). Constructed first — before any

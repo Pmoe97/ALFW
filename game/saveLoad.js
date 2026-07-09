@@ -9,9 +9,12 @@
 //
 // The config is embedded in full so a save is self-contained: a future retune
 // of the shipped worldConfig can never silently change what an old save
-// replays into (different seeds/tuning => a different world). Loaders that
-// care can compare save.config against the shipped config and fail loudly on
-// drift rather than guessing.
+// replays into (different seeds/tuning => a different world). See
+// diffConfigKeys below and buildSampleWorld's use of it — drift from the
+// currently-shipped config is surfaced as a loud warning at load time, never
+// a silent pass-through and never a hard failure (a save must keep loading
+// correctly under the rules it was created with even after the game has
+// since been retuned).
 //
 // No node imports here — this module must bundle for the browser as-is.
 
@@ -62,6 +65,23 @@ export function serializeWorld(world) {
 // for createWorldState(config, eventLog). Shape errors throw with the reason;
 // deep validation of the log itself (seq contiguity, entry shape) lives in
 // createWorldState so EVERY loaded log passes through it.
+// diffConfigKeys — PURE. Top-level config keys that differ between a shipped
+// config and a save's embedded config (compared via JSON.stringify per key —
+// config is plain JSON-safe data, so this is exact). A save always REPLAYS
+// under its OWN embedded config, never the currently-shipped one — that is
+// the entire reason config is embedded: a future retune of worldConfig.json
+// must not silently change what an old save replays into. Drift is therefore
+// never a load-time error, only something worth surfacing loudly (see
+// buildSampleWorld's warning) so it doesn't pass unnoticed during development.
+export function diffConfigKeys(shipped, saved) {
+  const keys = new Set([...Object.keys(shipped ?? {}), ...Object.keys(saved ?? {})]);
+  const diffed = [];
+  for (const key of keys) {
+    if (JSON.stringify(shipped?.[key]) !== JSON.stringify(saved?.[key])) diffed.push(key);
+  }
+  return diffed.sort();
+}
+
 export function parseSave(text) {
   let save;
   try {

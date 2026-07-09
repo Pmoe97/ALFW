@@ -26,7 +26,7 @@ import { fallbackDialogue } from './ai/fallbackDialogue.js';
 import { createQueueManager } from './ai/queueManager.js';
 import { getDialogue } from './ai/getDialogue.js';
 import { buildSampleWorld } from './game/sampleWorld.js';
-import { serializeWorld, parseSave } from './game/saveLoad.js';
+import { serializeWorld, parseSave, diffConfigKeys } from './game/saveLoad.js';
 import { createRelationshipEffectEngine } from './engines/relationshipEffectEngine.js';
 import { createMemoryEngine, deriveEntityMemories } from './engines/memoryEngine.js';
 import { helpNpc, robNpc, ignoreNpc } from './actions/playerActions.js';
@@ -2815,6 +2815,55 @@ assert.deepEqual(
   'the post-load cache must still equal its own rebuild'
 );
 console.log('SL12 PASSED: the loaded world is live — new events continue the log and every cache stays coherent');
+
+// --- SL13: config drift — a save's embedded config differing from the
+// currently-shipped config must be DETECTED and LOUDLY WARNED ABOUT, but must
+// NEVER block loading and must NEVER be silently swapped for the shipped
+// values (that would replay an old save under someone else's seed/tuning).
+// This is the actual failure-path test the design called for: not just "a
+// matching save round-trips" (SL2), but "a MISMATCHED save is rejected
+// loudly, not silently accepted."
+const slShippedConfig = slA.world.getState().config; // built with no save => exactly WORLD_CONFIG
+const slGoodSave = parseSave(slSaveText);
+assert.deepEqual(diffConfigKeys(slShippedConfig, slGoodSave.config), [], 'a save with no drift must report no differing keys');
+
+const slDriftedSave = { ...slGoodSave, config: { ...slGoodSave.config, rngSeed: slGoodSave.config.rngSeed + 1 } };
+assert.deepEqual(diffConfigKeys(slShippedConfig, slDriftedSave.config), ['rngSeed'], 'a deliberately mismatched save must report exactly the differing key');
+
+function captureConsole(fn) {
+  const original = console.log;
+  const lines = [];
+  console.log = (...args) => { lines.push(args.join(' ')); };
+  try {
+    fn();
+  } finally {
+    console.log = original;
+  }
+  return lines;
+}
+
+let slDriftWorld;
+const slDriftLines = captureConsole(() => {
+  assert.doesNotThrow(() => {
+    slDriftWorld = buildSampleWorld({ save: slDriftedSave });
+  }, 'a config-mismatched save must load without throwing — old saves must not be bricked by a future shipped-config retune');
+});
+assert.equal(
+  slDriftWorld.world.getState().config.rngSeed,
+  slDriftedSave.config.rngSeed,
+  "the loaded world must replay under the SAVE's own config, not silently fall back to the shipped one"
+);
+assert.equal(
+  slDriftLines.filter((l) => l.includes('WARNING') && l.includes('rngSeed')).length,
+  1,
+  'exactly one loud warning naming the drifted key must be logged on a mismatched load'
+);
+
+const slNoDriftLines = captureConsole(() => {
+  buildSampleWorld({ save: slGoodSave });
+});
+assert.equal(slNoDriftLines.filter((l) => l.includes('SaveLoad')).length, 0, 'a save with no config drift must not warn');
+console.log("SL13 PASSED: config drift between a save and the shipped config is detected and loudly warned about, but never blocks loading and never silently swaps in the shipped values");
 
 console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read matches the original exactly');
 
