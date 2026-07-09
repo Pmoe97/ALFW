@@ -278,12 +278,11 @@ export function createPoiEngine(world) {
   const injectedByNode = new Map();
   const grantedReveals = new Set();
 
-  // ORDER MATTERS, exactly as with the relationship store and faction engine:
-  // these subscriptions must be registered before any POI_* is dispatched (seeds
-  // included) or the caches would miss those early events and silently go stale
-  // (only the rebuild* methods would then be correct). Construct the engine
-  // before any seeding.
-  world.subscribe(POI_DISCOVERED, (entry) => {
+  // applyDiscovered / applyInjected / applyRevealGranted — the ONE code path
+  // per event type that folds it into its cache. Each runs at construction for
+  // entries already in the log (cold-start priming against a loaded save), then
+  // live via the subscriptions below.
+  function applyDiscovered(entry) {
     const { nodeId, poiId } = entry.payload;
     let set = discoveredByNode.get(nodeId);
     if (!set) {
@@ -291,9 +290,9 @@ export function createPoiEngine(world) {
       discoveredByNode.set(nodeId, set);
     }
     set.add(poiId);
-  });
+  }
 
-  world.subscribe(POI_INJECTED, (entry) => {
+  function applyInjected(entry) {
     const { nodeId, poi } = entry.payload;
     let list = injectedByNode.get(nodeId);
     if (!list) {
@@ -301,11 +300,25 @@ export function createPoiEngine(world) {
       injectedByNode.set(nodeId, list);
     }
     list.push(poi);
-  });
+  }
 
-  world.subscribe(POI_REVEAL_GRANTED, (entry) => {
+  function applyRevealGranted(entry) {
     grantedReveals.add(entry.payload.poiId);
-  });
+  }
+
+  // Prime from existing history (no-op on a fresh world), then subscribe.
+  // ORDER MATTERS for the subscriptions exactly as with the relationship store
+  // and faction engine: they must be live before any NEW POI_* is dispatched or
+  // the caches would miss those events and silently go stale (only the rebuild*
+  // methods would then be correct). Construct the engine before any seeding.
+  for (const entry of world.getEventLog()) {
+    if (entry.type === POI_DISCOVERED) applyDiscovered(entry);
+    else if (entry.type === POI_INJECTED) applyInjected(entry);
+    else if (entry.type === POI_REVEAL_GRANTED) applyRevealGranted(entry);
+  }
+  world.subscribe(POI_DISCOVERED, applyDiscovered);
+  world.subscribe(POI_INJECTED, applyInjected);
+  world.subscribe(POI_REVEAL_GRANTED, applyRevealGranted);
 
   // The full pool for a node from the caches: pure baseline + injected. Kept
   // separate from getPoiState so callers that only need the source pool (not the

@@ -26,8 +26,9 @@ import { fallbackDialogue } from './ai/fallbackDialogue.js';
 import { createQueueManager } from './ai/queueManager.js';
 import { getDialogue } from './ai/getDialogue.js';
 import { buildSampleWorld } from './game/sampleWorld.js';
+import { serializeWorld, parseSave } from './game/saveLoad.js';
 import { createRelationshipEffectEngine } from './engines/relationshipEffectEngine.js';
-import { createMemoryEngine } from './engines/memoryEngine.js';
+import { createMemoryEngine, deriveEntityMemories } from './engines/memoryEngine.js';
 import { helpNpc, robNpc, ignoreNpc } from './actions/playerActions.js';
 import {
   createWorldClockEngine,
@@ -2553,10 +2554,275 @@ console.log(`EM-final PASSED: Section EM produced identical output across two fu
 
 console.log('\nSection V+EM PASSED: voice directives are permanent, axis-derived, and coherent by construction; emotion is a transient per-turn read that is reproducible from history yet stored nowhere');
 
+// =============================================================================
+// Section SL: save/load — round-tripping the ENTIRE world state.
+//
+// The architecture's core promise, put on trial end to end: raw state is
+// exactly (config, event log), so a save is serializeWorld's JSON of those two
+// things and NOTHING else, and load is "hand the saved log to a fresh
+// buildSampleWorld, wire a fresh engine set, let every engine prime from the
+// log it finds." A lived-in world — explored map, discovered/injected POIs,
+// faction overrides, a populated settlement, race edits, clock history, and
+// memories INCLUDING AI-enhanced summary text (stubbed generateText) — is
+// serialized to an actual JSON string, reconstructed from that string alone,
+// and every derived read on the reconstruction must equal the original live
+// world exactly. This is the proof that no state lives outside the log:
+// live-only mutations (the old in-place AI summary overwrite) or
+// subscribe-only caches (cold-start against a non-empty log) would fail here.
+// =============================================================================
+console.log('\n=== Section SL: save/load — round-tripping the entire world state ===');
+
+// Deterministic AI stub, identical for every run: the "AI-written" line is a
+// pure function of the prompt, so enhanced summaries are reproducible and
+// visibly different from the templates.
+function slStubGenerateText(prompt) {
+  const who = /^You are ([^.]+)\./.exec(prompt)?.[1] ?? 'someone';
+  return Promise.resolve(`${who} will not forget what the player did today.`);
+}
+
+// The Section M/N synthetic-node convention: engines take classified node
+// objects from the game layer, so hand-authored classifications keep the
+// section deterministic and self-contained.
+function slSettlement(id, tier, x, y) {
+  return {
+    id,
+    x,
+    y,
+    classification: { kind: 'settlement', tier, settlementId: id, baselineFaction: 'faction_old_guard', notability: null, hospitability: null },
+  };
+}
+
+// wireEngines — the canonical full-world wiring order, shared verbatim by the
+// original build and the load path (that sharing IS the point: load is the
+// same construction, just against a world whose log is already full).
+// Presence for the memory engine is the generator's roster — the only
+// location signal that exists.
+function slWireEngines(fan) {
+  const effects = createRelationshipEffectEngine(fan.world, fan.relationships);
+  const map = createWorldMapEngine(fan.world);
+  const poi = createPoiEngine(fan.world);
+  const faction = createFactionEngine(fan.world);
+  const npcGen = createNpcGeneratorEngine(fan.world, fan.registry, fan.races);
+  const memory = createMemoryEngine(fan.world, fan.registry, {
+    witnessesAt: (nodeId) => npcGen.rosterIdsAt(nodeId),
+  });
+  const clock = createWorldClockEngine(fan.world);
+  return { effects, map, poi, faction, npcGen, memory, clock };
+}
+
+// slBuildLivedInWorld — build a fresh world and LIVE in it: a representative
+// mix of actions across every engine, including AI-enhanced memories under the
+// stub. Waits for every fired enhancement to land in the log before returning,
+// so the returned world is fully settled (no in-flight async work).
+async function slBuildLivedInWorld() {
+  const fan = buildSampleWorld();
+  const { world, registry, relationships, races, mira, rowan, sable } = fan;
+  const engines = slWireEngines(fan);
+  const { map, poi, faction, npcGen } = engines;
+
+  // Count expected vs landed enhancements so the settle-wait below is exact:
+  // every committed rememberer fires one background enhancement under the stub.
+  let expectedEnhancements = 0;
+  let seenEnhancements = 0;
+  world.subscribe('MEMORY_RECORDED', (e) => { expectedEnhancements += e.payload.memories.length; });
+  world.subscribe('MEMORY_SUMMARY_ENHANCED', () => { seenEnhancements += 1; });
+
+  // Race edits BEFORE populating, so the committed roster is generated under
+  // the edited registry (the sanctioned live-settings coupling).
+  const raceList = races.getRaces();
+  races.setRaceWeight(raceList[0].id, 7);
+  races.setRaceEnabled(raceList[1].id, false);
+
+  // Explore the map: two rings out from the origin, plus a re-materialization
+  // that must NOT append a second event for the same node.
+  const origin = map.getOriginNode();
+  const ring1 = map.materializeNeighbors(origin.id);
+  const nodeA = ring1.neighbors[0];
+  const logLenBeforeRepeat = world.getEventLog().length;
+  const ring1Again = map.materializeNeighbors(origin.id);
+  assert.equal(world.getEventLog().length, logLenBeforeRepeat, 're-materializing an explored node must not log a second event');
+  assert.deepEqual(ring1Again.neighbors.map((n) => n.id), ring1.neighbors.map((n) => n.id), 're-materialization returns the same neighbor set');
+  const ring2 = map.materializeNeighbors(nodeA.id);
+  const exploredNodeIds = [...new Set([origin.id, ...ring1.neighbors.map((n) => n.id), ...ring2.neighbors.map((n) => n.id)])];
+
+  // POIs at a synthetic village: blind attempts, a post-visit hidden
+  // injection, reveal authority, and a directed find of the hidden POI.
+  const village = slSettlement('sl_village', 'village', 2600, 2600);
+  poi.exploreBlind(village);
+  poi.exploreBlind(village);
+  poi.exploreBlind(village);
+  poi.injectPoi(village.id, { id: 'poi_sl_cache', category: 'cache', prominence: 0.5, hidden: true, data: {} });
+  poi.grantRevealAuthority('poi_sl_cache');
+  poi.exploreDirected(village, 'poi_sl_cache');
+
+  // Faction control: an override at the village, and an explicit
+  // taken-to-uncontrolled (null) at a second settlement — distinct from
+  // "no override, baseline applies."
+  const hamlet = slSettlement('sl_hamlet', 'hamlet', 3100, 3100);
+  faction.setFactionControl(village.id, 'faction_rebels');
+  faction.setFactionControl(hamlet.id, null);
+
+  // Populate the village and commit its roster to the log.
+  const roster = npcGen.populateNode(village);
+  assert.ok(roster.length >= 2, `SL needs a village roster with witnesses (got ${roster.length})`);
+  const victim = roster[0];
+
+  // Memories under the live-AI stub: a witnessed robbery at the village (the
+  // whole roster fans out) and an unwitnessed help of a hand-authored NPC.
+  // Every rememberer's template line is then enhanced via the stub, each
+  // enhancement landing as a MEMORY_SUMMARY_ENHANCED log event.
+  globalThis.generateText = slStubGenerateText;
+  robNpc(world, rowan.id, victim.id, village.id);
+  helpNpc(world, rowan.id, mira.id);
+
+  // Settle: wait until every fired enhancement has dispatched (bounded).
+  for (let i = 0; seenEnhancements < expectedEnhancements; i++) {
+    if (i > 2000) throw new Error(`SL: enhancements never settled (${seenEnhancements}/${expectedEnhancements})`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  delete globalThis.generateText;
+  assert.ok(expectedEnhancements >= 3, 'the robbery fan-out plus the help must have fired several enhancements');
+
+  // Clock history: ticks under two contexts (the POI explores above already
+  // switched the derived context to 'exploring'), plus a flat jump.
+  world.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
+  world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'chatting' });
+  world.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
+  world.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 3600 });
+
+  return { ...fan, ...engines, village, hamlet, victim, exploredNodeIds };
+}
+
+const slA = await slBuildLivedInWorld();
+const slSaveText = serializeWorld(slA.world);
+
+// --- SL1: whole-run determinism at the artifact level — living the exact same
+// life twice produces byte-identical save files (the runWorld/K6 idiom, but on
+// the save string itself, async AI enhancement included).
+const slB = await slBuildLivedInWorld();
+assert.equal(serializeWorld(slB.world), slSaveText, 'two identical runs must produce byte-identical saves');
+console.log(`SL1 PASSED: two identical lived-in runs serialize to byte-identical saves (${slSaveText.length} chars, ${slA.world.getEventLog().length} events)`);
+
+// --- SL2: reconstruct a COMPLETELY fresh world + engine set from the save
+// string alone, through the same construction path a fresh world uses.
+const slLoaded = buildSampleWorld({ save: parseSave(slSaveText) });
+const slL = { ...slLoaded, ...slWireEngines(slLoaded) };
+assert.deepEqual(slL.world.getEventLog(), slA.world.getEventLog(), 'the loaded log must equal the original log exactly');
+assert.deepEqual(slL.world.getState().config, slA.world.getState().config, 'the loaded config must equal the original config exactly');
+console.log('SL2 PASSED: fresh world reconstructed from the save string alone — log and config identical');
+
+// --- SL3: relationships — stats, tiers, and direct-set labels all match, and
+// the loaded store's primed cache equals its own from-scratch rebuild.
+const slPairs = [
+  [slA.rowan.id, slA.mira.id],
+  [slA.mira.id, slA.rowan.id],
+  [slA.mira.id, slA.sable.id],
+  [slA.sable.id, slA.mira.id],
+  [slA.victim.id, slA.rowan.id],
+];
+for (const [from, to] of slPairs) {
+  const a = slA.relationships.getRelationship(from, to);
+  const l = slL.relationships.getRelationship(from, to);
+  assert.deepEqual(l, a, `relationship ${from}->${to} must round-trip`);
+  assert.equal(relationshipTier(l.stats), relationshipTier(a.stats), `tier ${from}->${to} must round-trip`);
+  assert.deepEqual(slL.relationships.rebuildRelationshipStats(from, to), l.stats, `loaded cache ${from}->${to} must equal its own rebuild`);
+}
+console.log('SL3 PASSED: relationship stats, tiers, and labels round-trip; loaded cache equals from-scratch rebuild');
+
+// --- SL4: race registry — the edited table round-trips and the loaded primed
+// cache equals its own rebuild.
+assert.deepEqual(slL.races.getRaces(), slA.races.getRaces(), 'the edited race table must round-trip');
+assert.deepEqual(slL.races.rebuildRaces(), slL.races.getRaces(), 'loaded race cache must equal its own rebuild');
+console.log('SL4 PASSED: race registry (with live edits) round-trips');
+
+// --- SL5: the explored map graph — every known node, WITH its edges (pure
+// terrain/classification plus order-dependent materialization state), plus the
+// materialized set and origin.
+assert.deepEqual(slL.map.getOriginNode(), slA.map.getOriginNode(), 'origin node must round-trip');
+for (const id of slA.exploredNodeIds) {
+  assert.deepEqual(slL.map.getNode(id), slA.map.getNode(id), `map node ${id} (incl. edges) must round-trip`);
+  assert.equal(slL.map.isMaterialized(id), slA.map.isMaterialized(id), `materialized flag for ${id} must round-trip`);
+}
+console.log(`SL5 PASSED: explored map graph round-trips — ${slA.exploredNodeIds.length} nodes with identical edges and materialization state`);
+
+// --- SL6: POI state — pool (baseline + injected), discovered set, reveal
+// authority; loaded caches equal their own rebuilds.
+assert.deepEqual(slL.poi.getPoiState(slA.village), slA.poi.getPoiState(slA.village), 'village POI state must round-trip');
+assert.deepEqual(slL.poi.getRevealedPoiIds(), slA.poi.getRevealedPoiIds(), 'reveal authority must round-trip');
+assert.deepEqual(slL.poi.rebuildDiscoveredPoiIds(slA.village), slL.poi.getPoiState(slA.village).discovered, 'loaded discovered cache must equal its own rebuild');
+assert.deepEqual(slL.poi.rebuildRevealedPoiIds(), slL.poi.getRevealedPoiIds(), 'loaded reveal cache must equal its own rebuild');
+console.log('SL6 PASSED: POI pools, discoveries, injections, and reveal authority round-trip');
+
+// --- SL7: faction control — the override and the explicit-null both
+// round-trip (and the null is an override, not the baseline).
+assert.equal(slA.faction.getFactionControl(slA.village), 'faction_rebels');
+assert.equal(slL.faction.getFactionControl(slA.village), 'faction_rebels', 'village faction override must round-trip');
+assert.equal(slL.faction.getFactionControl(slA.hamlet), null, 'explicit-null control must round-trip (not fall back to baseline)');
+assert.equal(slL.faction.rebuildFactionControl(slA.village), 'faction_rebels', 'loaded faction cache must equal its own rebuild');
+console.log('SL7 PASSED: faction overrides round-trip, including taken-to-uncontrolled (explicit null)');
+
+// --- SL8: every registered entity — hand-authored AND generated — deep-equals
+// its original, INCLUDING the memories arrays with AI-ENHANCED summary text.
+// This is the regression test for the old in-place summary overwrite: were the
+// enhancement not a logged event, the loaded side would show template text.
+const slById = (list) => [...list].sort((a, b) => (a.id < b.id ? -1 : 1));
+assert.deepEqual(slById(slL.registry.all()), slById(slA.registry.all()), 'every registered entity must round-trip exactly');
+const slVictimA = slA.registry.get(slA.victim.id);
+const slVictimL = slL.registry.get(slA.victim.id);
+assert.equal(slVictimA.psychology.memories[0].summary, `${slVictimA.identity.firstName} will not forget what the player did today.`, 'the original victim memory carries the AI-enhanced line');
+assert.equal(slVictimL.psychology.memories[0].summary, slVictimA.psychology.memories[0].summary, 'the AI-enhanced summary text must round-trip, not regress to the template');
+assert.deepEqual(slL.memory.rebuildMemories(slA.victim.id), slVictimL.psychology.memories, 'loaded entity memories must equal their own from-scratch rebuild');
+assert.deepEqual(deriveEntityMemories(slL.world.getEventLog(), slA.mira.id), slL.registry.get(slA.mira.id).psychology.memories, 'hand-authored entity memories must equal the pure derivation');
+console.log(`SL8 PASSED: all ${slA.registry.all().length} entities round-trip exactly, AI-enhanced memory text included`);
+
+// --- SL9: clock — total, calendar date, and active context all match; the
+// loaded primed cache equals its own rebuild.
+assert.equal(slL.clock.getTotalGameSeconds(), slA.clock.getTotalGameSeconds(), 'game-time total must round-trip');
+assert.deepEqual(slL.clock.getCurrentDate(), slA.clock.getCurrentDate(), 'calendar date must round-trip');
+assert.equal(slL.clock.getActiveTimeContext(), slA.clock.getActiveTimeContext(), 'active time context must round-trip');
+assert.equal(slL.clock.rebuildTotalGameSeconds(), slL.clock.getTotalGameSeconds(), 'loaded clock cache must equal its own rebuild');
+console.log(`SL9 PASSED: clock round-trips — ${slL.clock.getTotalGameSeconds()}s game time, context '${slL.clock.getActiveTimeContext()}'`);
+
+// --- SL10: derived reads that are never stored anywhere — emotion (and the
+// npc roster view) — reproduce identically on the loaded side.
+assert.deepEqual(
+  deriveEmotion(slVictimL, slVictimL.psychology.memories, slL.world.getEventLog()),
+  deriveEmotion(slVictimA, slVictimA.psychology.memories, slA.world.getEventLog()),
+  'the emotional read must reproduce identically from the loaded world'
+);
+assert.deepEqual(slL.npcGen.getPopulation(slA.village).map((n) => n.id), slA.npcGen.getPopulation(slA.village).map((n) => n.id), 'the village roster must round-trip');
+assert.deepEqual(slL.npcGen.rebuildNodePopulation(slA.village.id).map((n) => n.id), slL.npcGen.getPopulation(slA.village).map((n) => n.id), 'loaded roster cache must equal its own rebuild');
+console.log('SL10 PASSED: transient derived reads (emotion, rosters) reproduce identically from the loaded world');
+
+// --- SL11: saving the loaded world reproduces the original save byte for
+// byte — load is lossless, so save->load->save is a fixed point.
+assert.equal(serializeWorld(slL.world), slSaveText, 'save -> load -> save must be byte-identical');
+console.log('SL11 PASSED: save -> load -> save is a byte-identical fixed point');
+
+// --- SL12: the loaded world is LIVE — a new action continues the log at the
+// next seq, moves stats, and lands a new memory, exactly as it would have in
+// the original session.
+const slSeqBefore = slL.world.getEventLog().length;
+const slMiraTrustBefore = slL.relationships.getRelationship(slA.mira.id, slA.rowan.id).stats;
+const slMiraMemsBefore = slL.registry.get(slA.mira.id).psychology.memories.length;
+const slNewEntry = helpNpc(slL.world, slA.rowan.id, slA.mira.id);
+assert.equal(slNewEntry.seq, slSeqBefore, 'a post-load dispatch must continue seq from the loaded history');
+assert.notDeepEqual(slL.relationships.getRelationship(slA.mira.id, slA.rowan.id).stats, slMiraTrustBefore, 'post-load actions must move relationship stats');
+assert.equal(slL.registry.get(slA.mira.id).psychology.memories.length, slMiraMemsBefore + 1, 'post-load actions must land new memories');
+assert.deepEqual(
+  slL.relationships.rebuildRelationshipStats(slA.mira.id, slA.rowan.id),
+  slL.relationships.getRelationship(slA.mira.id, slA.rowan.id).stats,
+  'the post-load cache must still equal its own rebuild'
+);
+console.log('SL12 PASSED: the loaded world is live — new events continue the log and every cache stays coherent');
+
+console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read matches the original exactly');
+
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
-// transport plumbing, fallback + contract enforcement, memory fan-out, and the
-// permanent-voice / transient-emotion derivations. Real live-AI verification
+// transport plumbing, fallback + contract enforcement, memory fan-out, the
+// permanent-voice / transient-emotion derivations, and the full save/load
+// round-trip of the entire world state. Real live-AI verification
 // (dialogue lines AND memory-summary lines) can only happen by hand inside an
 // actual Perchance page.
 console.log('\nALL CHECKS PASSED');

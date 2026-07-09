@@ -148,15 +148,19 @@ export function deriveRaceRegistry(config, log) {
 export function createRaceRegistry(world) {
   const { config } = world.getState();
 
-  // The accelerator cache: raceId -> def, seeded from config defaults and kept
-  // current by the subscriptions below. Always fully rebuildable from the log
-  // alone via deriveRaceRegistry (see rebuildRaces).
-  const current = deriveRaceRegistry(config, []);
+  // The accelerator cache: raceId -> def, seeded from config defaults REPLAYED
+  // through whatever RACE_* history the log already holds (an empty log on a
+  // fresh world makes this the plain defaults), and kept current by the
+  // subscriptions below. Priming from the existing log is what lets this
+  // registry cold-start correctly against a loaded save. Always fully
+  // rebuildable from the log alone via deriveRaceRegistry (see rebuildRaces).
+  const current = deriveRaceRegistry(config, world.getEventLog());
 
   // ORDER MATTERS, exactly as with the relationship store and POI engine:
-  // these subscriptions must be registered before any RACE_* is dispatched or
-  // the cache would miss those events and silently go stale (only rebuildRaces
-  // would then be correct). Construct the registry before any settings edits.
+  // these subscriptions must be registered before any NEW RACE_* is dispatched
+  // or the cache would miss those events and silently go stale (only
+  // rebuildRaces would then be correct). Construct the registry before any
+  // settings edits.
   world.subscribe(RACE_ADDED, (entry) => {
     current[entry.payload.raceId] = structuredClone(entry.payload.def);
   });

@@ -377,19 +377,31 @@ export function createNpcGeneratorEngine(world, registry, races) {
   // also the no-op guard that makes a committed roster permanent.
   const populatedByNode = new Map();
 
-  // ORDER MATTERS, exactly as with the relationship store and POI engine:
-  // register before any NODE_POPULATED is dispatched. Registering the live
-  // entities happens HERE (not in populateNode) so a replayed/injected
-  // NODE_POPULATED behaves identically to a locally-generated one. The
-  // structuredClone is load-bearing: dispatch deep-freezes the log entry (the
-  // permanent birth record), while the registered entity must stay mutable —
-  // memoryEngine pushes memories onto it. Live entity = mutable clone of the
-  // frozen snapshot; they diverge after birth by design.
-  world.subscribe(NODE_POPULATED, (entry) => {
+  // applyNodePopulated — the ONE code path that commits a NODE_POPULATED into
+  // the cache AND the live entity registry. It runs at construction for entries
+  // already in the log (cold-start priming against a loaded save — this is
+  // what re-registers every generated NPC on load, from the birth snapshots the
+  // log carries), then live via the subscription. Registering happens HERE
+  // (not in populateNode) so a replayed/injected NODE_POPULATED behaves
+  // identically to a locally-generated one. The structuredClone is
+  // load-bearing: dispatch deep-freezes the log entry (the permanent birth
+  // record), while the registered entity must stay mutable — memoryEngine
+  // pushes memories onto it. Live entity = mutable clone of the frozen
+  // snapshot; they diverge after birth by design.
+  function applyNodePopulated(entry) {
     const { nodeId, npcs } = entry.payload;
     populatedByNode.set(nodeId, npcs.map((n) => n.id));
     for (const snapshot of npcs) registry.register(structuredClone(snapshot));
-  });
+  }
+
+  // Prime from existing history (no-op on a fresh world), then subscribe.
+  // ORDER MATTERS for the subscription exactly as with the relationship store
+  // and POI engine: it must be live before any NEW NODE_POPULATED is
+  // dispatched.
+  for (const entry of world.getEventLog()) {
+    if (entry.type === NODE_POPULATED) applyNodePopulated(entry);
+  }
+  world.subscribe(NODE_POPULATED, applyNodePopulated);
 
   // populateNode — LAZY, the POI lazy-on-explore pattern: the game layer calls
   // this the first time it actually needs a node's people; merely passing

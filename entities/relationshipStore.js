@@ -124,15 +124,23 @@ export function createRelationshipStore(world) {
   const cachedStats = new Map();
   // labels: edgeKey -> fromCallsTo. Direct-set, no log involvement — a label is
   // inherently asymmetric and carries no history worth replaying.
+  //
+  // SAVE/LOAD BOUNDARY: because labels and family ties are NOT in the log,
+  // they survive a load only because construction-time authoring re-runs
+  // (buildSampleWorld re-sets them, save or no save). That is safe exactly as
+  // long as setLabel/setFamilyTie stay authoring-time-only. The moment a
+  // RUNTIME feature edits labels or ties, it must go through a dispatched
+  // event instead, or the edit will silently vanish across save/load.
   const labels = new Map();
   const familyTies = new Map();
 
-  // ORDER MATTERS: this subscription must be registered before any
-  // RELATIONSHIP_EVENT is dispatched — including the seed recordRelationshipEvent
-  // calls in game/sampleWorld.js — or the cache will miss those early events and
-  // silently go stale (only rebuildRelationshipStats would then be correct).
-  // Construct the store before wiring engines / seeding, as sampleWorld does.
-  world.subscribe('RELATIONSHIP_EVENT', (entry) => {
+  // applyRelationshipEvent — the ONE code path that folds a RELATIONSHIP_EVENT
+  // into the cache. It runs twice over an entry's lifetime, never both: once at
+  // construction for entries already in the log (cold-start priming against a
+  // loaded save), or once live via the subscription below. Priming through the
+  // exact same function the subscription uses is definitionally identical to
+  // having been subscribed since seq 0.
+  function applyRelationshipEvent(entry) {
     const { fromId, toId, axis, delta } = entry.payload;
     if (!RELATIONSHIP_AXES.includes(axis)) return;
     const key = edgeKey(fromId, toId);
@@ -146,7 +154,19 @@ export function createRelationshipStore(world) {
       cachedStats.set(key, stats);
     }
     stats[axis] += delta;
-  });
+  }
+
+  // Prime the cache from whatever history the log already holds (a no-op on a
+  // fresh world), THEN subscribe for everything dispatched from here on.
+  // ORDER MATTERS for the subscription exactly as before: it must be live
+  // before any NEW RELATIONSHIP_EVENT is dispatched — including the seed
+  // recordRelationshipEvent calls in game/sampleWorld.js — or the cache will
+  // miss those events and silently go stale (only rebuildRelationshipStats
+  // would then be correct). Construct the store before wiring engines/seeding.
+  for (const entry of world.getEventLog()) {
+    if (entry.type === 'RELATIONSHIP_EVENT') applyRelationshipEvent(entry);
+  }
+  world.subscribe('RELATIONSHIP_EVENT', applyRelationshipEvent);
 
   // recordRelationshipEvent — the single sanctioned way to move a stat. It only
   // dispatches the action; the subscribe handler above updates the cache. This
