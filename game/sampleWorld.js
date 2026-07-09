@@ -302,7 +302,14 @@ export function buildSampleWorld() {
       hobbies: ['brewing', 'card games', 'gossip'],
       likes: ['a full tavern', 'fair trade', 'quiet mornings'],
       dislikes: ['cheats', 'watered-down ale', 'debt left unpaid'],
-      voice: { accent: 'Vale Country drawl', speechPattern: 'blunt, peppered with tavern slang', tags: ['gravelly', 'warm'] },
+      voice: {
+        accent: 'Vale Country drawl',
+        directives: [
+          'Talk like a barkeep who has heard every excuse — blunt and plainspoken.',
+          'Stay warm underneath, even when your patience is running short.',
+          'Keep it short and get to what someone actually needs.',
+        ],
+      },
       memories: [], // no farm engine here (unlike proof.js), so nothing points at a real event-log entry
       flags: { personality: ['stubborn'], condition: [], aiDirectives: [] },
     },
@@ -363,7 +370,13 @@ export function buildSampleWorld() {
       hobbies: ['whittling', 'map-reading'],
       likes: ['a good story', 'clear directions', 'strong coffee'],
       dislikes: ['crowds', 'being lied to'],
-      voice: { accent: 'Northmarch', speechPattern: 'terse, understated', tags: ['low', 'even'] },
+      voice: {
+        accent: 'Northmarch',
+        directives: [
+          'Say little; keep replies terse and understated.',
+          'Lean dry and wry rather than warm.',
+        ],
+      },
       memories: [],
       flags: { personality: ['wary of strangers'], condition: [], aiDirectives: [] },
     },
@@ -421,8 +434,11 @@ export function buildSampleWorld() {
       dislikes: ['being asked about the books', 'silence at a card table', 'owing anyone anything'],
       voice: {
         accent: 'clipped Aldervale dockside patter, sanded smoother than it used to be',
-        speechPattern: 'fast, funny, always half a joke ahead of the conversation — the joke lands half a beat before she\'d be caught out on something, especially money',
-        tags: ['quick', 'sly', 'warm'],
+        directives: [
+          'Stay fast and funny — land a joke half a beat before anyone can pin you down.',
+          'Volunteer plenty of words; fill a silence before it fills itself.',
+          'Keep real warmth under the banter, even while you are deflecting.',
+        ],
       },
       memories: [], // no farm engine here (unlike proof.js), so nothing points at a real event-log entry
       flags: {

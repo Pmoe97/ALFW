@@ -9,12 +9,12 @@
 // is exactly how availability is detected: there is no API key, header, or
 // endpoint on our side at all.
 
-import { createQueueManager } from './queueManager.js';
+import { aiQueue as queue } from './sharedQueue.js';
 import { validateDialogueResponse } from './responseContract.js';
 
-// The single queue every AI call in the game routes through. Module-internal
-// for now; image call sites will share it when they exist.
-const queue = createQueueManager();
+// The single queue every AI call in the game routes through (ai/sharedQueue.js).
+// Foreground dialogue here and background memory summaries in generateSummary.js
+// draw on the same budget, so the queue's foreground-headroom guarantee holds.
 
 // The transport has no structured error codes — rate limiting can only be
 // detected by matching the rejected promise's message text (FUOC pattern).

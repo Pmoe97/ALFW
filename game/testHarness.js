@@ -27,7 +27,18 @@ import { log, setChannelEnabled } from '../debugLog.js';
 
 const { world, registry, relationships, mira, rowan, sable } = buildSampleWorld();
 createRelationshipEffectEngine(world, relationships);
-createMemoryEngine(world, registry);
+
+// Memory fan-out demo. The full generator isn't running in this hand-authored
+// scene, so a tiny presence stub stands in for npcGeneratorEngine.rosterIdsAt:
+// it says Mira and Sable share one node (DEMO_SCENE_NODE). The player verbs
+// below pass that nodeId, so acting on Mira also lands a witnessed memory on
+// Sable — exactly the co-located fan-out the real presence source will drive
+// once schedules/location tracking exist.
+const DEMO_SCENE_NODE = 'demo_scene';
+const presence = {
+  witnessesAt: (nodeId) => (nodeId === DEMO_SCENE_NODE ? [mira.id, sable.id] : []),
+};
+createMemoryEngine(world, registry, presence);
 
 // World clock: created BEFORE the tick source starts so it catches every
 // CLOCK_TICK. It owns all game-time derivation; the tick source below only
@@ -69,10 +80,15 @@ function render() {
     .join('');
   relationshipEl.innerHTML = `<ul>${statsHtml}</ul><p>tier: ${relationshipTier(edge.stats)}</p>`;
 
-  const memoriesHtml = mira.psychology.memories
-    .map((m) => `<li>[seq ${m.seq}] ${m.summary}</li>`)
+  // Mira's own memories plus any Sable picked up as a co-located witness — the
+  // fan-out made visible.
+  const miraMem = mira.psychology.memories
+    .map((m) => `<li>Mira: [seq ${m.seq}] ${m.summary}</li>`)
     .join('');
-  memoriesEl.innerHTML = `<ul>${memoriesHtml}</ul>`;
+  const sableMem = sable.psychology.memories
+    .map((m) => `<li>Sable (witness): [seq ${m.seq}] ${m.summary}</li>`)
+    .join('');
+  memoriesEl.innerHTML = `<ul>${miraMem}${sableMem}</ul>`;
 
   renderRelationshipTiers();
 }
@@ -132,22 +148,22 @@ renderClock();
 tick.start();
 
 document.getElementById('btn-help').addEventListener('click', () => {
-  helpNpc(world, rowan.id, mira.id);
+  helpNpc(world, rowan.id, mira.id, DEMO_SCENE_NODE);
   render();
 });
 document.getElementById('btn-rob').addEventListener('click', () => {
-  robNpc(world, rowan.id, mira.id);
+  robNpc(world, rowan.id, mira.id, DEMO_SCENE_NODE);
   render();
 });
 document.getElementById('btn-ignore').addEventListener('click', () => {
-  ignoreNpc(world, rowan.id, mira.id);
+  ignoreNpc(world, rowan.id, mira.id, DEMO_SCENE_NODE);
   render();
 });
 
 document.getElementById('btn-talk').addEventListener('click', async () => {
   const playerLine = playerInputEl.value;
   const edge = relationships.getRelationship(mira.id, rowan.id);
-  const result = await getDialogue(mira, edge, mira.psychology.memories, playerLine);
+  const result = await getDialogue(mira, edge, mira.psychology.memories, playerLine, world.getEventLog());
   log('TestHarness', 'dialogue result:', result);
   dialogueOutputEl.textContent = JSON.stringify(
     { source: result.source, dialogue: result.response.dialogue },
