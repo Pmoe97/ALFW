@@ -21,6 +21,17 @@
  */
 
 /**
+ * A single transient emotional read. NEVER stored on an entity — it is the
+ * output of entities/deriveEmotion.js, recomputed fresh every turn from the
+ * NPC's recent memories + axes and rendered into the dialogue prompt. Documented
+ * here only so callers have a shape to reference.
+ * @typedef {Object} EmotionRead
+ * @property {string} emotion - the named feeling (e.g. 'indignant', 'fond')
+ * @property {number} intensity - 0..1, relative to the dominant read
+ * @property {string} band - human-readable strength: 'mild' | 'moderate' | 'strong'
+ */
+
+/**
  * @typedef {Object} ScheduleEntry
  * @property {string} timeOfDay
  * @property {string} locationId
@@ -64,7 +75,11 @@
  * @property {string[]} hobbies
  * @property {string[]} likes
  * @property {string[]} dislikes
- * @property {{accent: string, speechPattern: string, tags: string[]}} voice
+ * @property {{accent: string, directives: string[]}} voice - `accent` is a
+ *   permanent cultural/racial flavor trait; `directives` are a small set of
+ *   concrete, imperative, axis-derived speech rules (entities/voice.js),
+ *   generated ONCE at creation and rendered at flag-level prompt prominence.
+ *   Both are permanent — never recomputed, never touched by per-turn emotion.
  * @property {MemoryRef[]} memories
  * @property {{personality: string[], condition: string[], aiDirectives: string[]}} flags
  */

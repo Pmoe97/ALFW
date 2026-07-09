@@ -73,6 +73,8 @@ import {
   derivePopulationSize,
   NODE_POPULATED,
 } from './engines/npcGeneratorEngine.js';
+import { deriveVoiceDirectives, CONFLICTING_PAIRS, AXIS_DIRECTIVES, MAX_DIRECTIVES } from './entities/voice.js';
+import { deriveEmotion } from './entities/deriveEmotion.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
@@ -166,7 +168,14 @@ const mira = createNpc({
     hobbies: ['brewing', 'card games', 'gossip'],
     likes: ['a full tavern', 'fair trade', 'quiet mornings'],
     dislikes: ['cheats', 'watered-down ale', 'debt left unpaid'],
-    voice: { accent: 'Vale Country drawl', speechPattern: 'blunt, peppered with tavern slang', tags: ['gravelly', 'warm'] },
+    voice: {
+      accent: 'Vale Country drawl',
+      directives: [
+        'Talk like a barkeep who has heard every excuse — blunt and plainspoken.',
+        'Stay warm underneath, even when your patience is running short.',
+        'Keep it short and get to what someone actually needs.',
+      ],
+    },
     memories: [], // filled in below once the referenced event has a seq
     flags: { personality: ['stubborn'], condition: [], aiDirectives: [] },
   },
@@ -227,7 +236,13 @@ const rowan = createPlayer({
     hobbies: ['whittling', 'map-reading'],
     likes: ['a good story', 'clear directions', 'strong coffee'],
     dislikes: ['crowds', 'being lied to'],
-    voice: { accent: 'Northmarch', speechPattern: 'terse, understated', tags: ['low', 'even'] },
+    voice: {
+      accent: 'Northmarch',
+      directives: [
+        'Say little; keep replies terse and understated.',
+        'Lean dry and wry rather than warm.',
+      ],
+    },
     memories: [],
     flags: { personality: ['wary of strangers'], condition: [], aiDirectives: [] },
   },
@@ -352,10 +367,25 @@ assert.ok(prompt.includes('Never reveal the size of the tavern strongbox.'), 'pr
 assert.ok(prompt.includes(mira.psychology.memories[0].summary), 'prompt must contain the memory summary');
 assert.ok(prompt.includes('Return ONLY valid JSON matching this exact shape'), 'prompt must contain the JSON-only instruction');
 
+// Voice — the PERMANENT directive section, rendered at imperative (flag-level)
+// prominence, NOT as soft descriptive flavor. Each directive is an ALWAYS line.
+assert.ok(prompt.includes('== Voice (speak this way) =='), 'prompt must carry the permanent Voice directive section');
+for (const directive of mira.psychology.voice.directives) {
+  assert.ok(prompt.includes(`- ALWAYS: ${directive}`), 'each voice directive must render as an imperative ALWAYS line');
+}
+// Emotion — the TRANSIENT per-turn read, a SEPARATE section from Voice (the two
+// must never be merged into one block). Built without a log here, so it shows
+// the calm baseline; the dedicated emotion section below proves real reads.
+assert.ok(prompt.includes('== Current emotional state =='), 'prompt must carry a distinct transient emotion section');
+assert.ok(
+  prompt.indexOf('== Voice (speak this way) ==') < prompt.indexOf('== Current emotional state =='),
+  'the permanent voice section and the transient emotion section must be distinct and separately placed'
+);
+
 // Determinism: byte-identical on a second build with the same inputs.
 const promptAgain = buildDialoguePrompt(mira, miraToRowanEdge, mira.psychology.memories, samplePlayerLine);
 assert.equal(prompt, promptAgain);
-console.log('\nSection A PASSED: all required parts present, assembly deterministic');
+console.log('\nSection A PASSED: all required parts present, permanent Voice + transient Emotion are distinct sections, assembly deterministic');
 
 // --- Section B: queue manager correctness (synthetic, no real AI) ------------
 console.log('\n=== Section B: queue manager correctness ===');
@@ -614,7 +644,50 @@ assert.doesNotThrow(() => {
 }, 'dispatching against an unregistered target id must not throw');
 console.log('E5 PASSED: unregistered target id is a defensive no-op, no crash');
 
-console.log('\nSection E PASSED: player verbs deterministically move relationship stats and auto-generate memories');
+// --- E6: memory fan-out — co-located witnesses remember too -----------------
+//         The same-node stand-in for real presence tracking: a presence source
+//         says Mira and Sable share a node. Robbing Mira THERE lands a
+//         first-person memory on Mira and an OBSERVER memory on Sable; the
+//         acting player is never a rememberer. (Under Node there is no
+//         generateText, so both summaries stay the deterministic templates.)
+const sampleFan = buildSampleWorld();
+createRelationshipEffectEngine(sampleFan.world, sampleFan.relationships);
+const DEMO_NODE = 'node_demo_scene';
+const fanPresence = {
+  witnessesAt: (nodeId) => (nodeId === DEMO_NODE ? [sampleFan.mira.id, sampleFan.sable.id] : []),
+};
+createMemoryEngine(sampleFan.world, sampleFan.registry, fanPresence);
+
+const fanEntry = robNpc(sampleFan.world, sampleFan.rowan.id, sampleFan.mira.id, DEMO_NODE);
+
+assert.equal(sampleFan.mira.psychology.memories.length, 1, 'the target remembers (first person)');
+assert.equal(sampleFan.mira.psychology.memories[0].summary, 'The player stole from me.', 'target keeps the first-person template');
+assert.equal(sampleFan.sable.psychology.memories.length, 1, 'the co-located witness remembers too');
+assert.ok(sampleFan.sable.psychology.memories[0].summary.includes('Mira'), 'the witness memory names who it happened to');
+assert.notEqual(
+  sampleFan.sable.psychology.memories[0].summary,
+  sampleFan.mira.psychology.memories[0].summary,
+  'witness perspective must differ from the victim first-person line'
+);
+assert.equal(sampleFan.rowan.psychology.memories.length, 0, 'the acting player is never a rememberer');
+assert.equal(
+  sampleFan.mira.psychology.memories[0].seq,
+  sampleFan.sable.psychology.memories[0].seq,
+  'target and witness memories reference the same event seq'
+);
+assert.equal(sampleFan.mira.psychology.memories[0].seq, fanEntry.seq, 'the memory points at the real dispatched entry');
+console.log(`E6 PASSED: witness Sable recorded "${sampleFan.sable.psychology.memories[0].summary}"; player recorded nothing`);
+
+// --- E7: no nodeId => no fan-out (single-target behavior preserved) ----------
+const sampleNoNode = buildSampleWorld();
+createRelationshipEffectEngine(sampleNoNode.world, sampleNoNode.relationships);
+createMemoryEngine(sampleNoNode.world, sampleNoNode.registry, fanPresence);
+robNpc(sampleNoNode.world, sampleNoNode.rowan.id, sampleNoNode.mira.id); // no nodeId
+assert.equal(sampleNoNode.mira.psychology.memories.length, 1, 'target still remembers without a node');
+assert.equal(sampleNoNode.sable.psychology.memories.length, 0, 'no nodeId => no witnesses, even with a presence source wired');
+console.log('E7 PASSED: without a nodeId the fan-out is inert — single-target behavior preserved');
+
+console.log('\nSection E PASSED: player verbs deterministically move relationship stats and auto-generate memories, fanning out to co-located witnesses when a node is named');
 
 assert.equal(unhandledRejections.length, 0, 'no unhandled rejection may have occurred anywhere');
 
@@ -2216,8 +2289,166 @@ console.log(`N-final PASSED: Section N produced identical output across two full
 
 console.log('\nSection N PASSED: rosters are deterministic under a fixed registry state and committed permanently as NODE_POPULATED birth snapshots; registry edits are logged settings facts that change only future generation (the designed exception to position-determinism); race extension fields merge additively onto the untouched base appearance; axes are race priors plus bounded seeded variance; population counts reuse the classification layer');
 
+// =============================================================================
+// Section V: voice directives — permanent, axis-derived, coherent by
+// construction. Voice is generated ONCE at NPC creation from the axes and never
+// recomputed (the appearance-grade permanence discipline). Because it is a pure
+// function of the axes, "permanent" and "reproducible" are the same statement:
+// same axes always yield the same directive set. The load-bearing property
+// here is COHERENCE — each axis owns a disjoint speech facet, so no selected
+// subset can seat two contradictory directives (the exact failure mode the
+// naive one-line-per-axis approach would allow).
+// =============================================================================
+console.log('\n=== Section V: voice directives (permanent, axis-derived, coherent) ===');
+
+function runSectionV(record) {
+  // Reverse map directive-string -> owning axis, built from the exported table.
+  // Two axes sharing a directive string would be cross-facet leakage; assert
+  // the table itself keeps every line unique to one axis (facet disjointness).
+  const directiveAxis = new Map();
+  for (const [axis, lines] of Object.entries(AXIS_DIRECTIVES)) {
+    for (const line of [lines.high, lines.low]) {
+      if (!line) continue;
+      assert.ok(!directiveAxis.has(line), `directive "${line}" must belong to exactly one axis facet`);
+      directiveAxis.set(line, axis);
+    }
+  }
+  record(`V0 PASSED: ${directiveAxis.size} directive lines each belong to exactly one axis facet (no cross-facet leakage)`);
+
+  // V1: purity/permanence — same axes -> byte-identical directives, every time.
+  const profile = { dominance: 8, agreeableness: 2, extraversion: 8, conscientiousness: 5, openness: 5 };
+  assert.deepEqual(deriveVoiceDirectives(profile), deriveVoiceDirectives(profile), 'deriveVoiceDirectives is pure in axes');
+  record(`V1 PASSED: identical axes reproduce an identical directive set (permanent birth fact): [${deriveVoiceDirectives(profile).join(' | ')}]`);
+
+  // V2: axis skew shows in the chosen lines — each axis speaks in its own lane.
+  const highDom = deriveVoiceDirectives({ dominance: 9 });
+  const lowDom = deriveVoiceDirectives({ dominance: 1 });
+  assert.ok(highDom.includes(AXIS_DIRECTIVES.dominance.high), 'high dominance -> the commanding stance directive');
+  assert.ok(lowDom.includes(AXIS_DIRECTIVES.dominance.low), 'low dominance -> the deferring stance directive');
+  const highExt = deriveVoiceDirectives({ extraversion: 9 });
+  const lowExt = deriveVoiceDirectives({ extraversion: 1 });
+  assert.ok(highExt.includes(AXIS_DIRECTIVES.extraversion.high), 'high extraversion -> the talkative length directive');
+  assert.ok(lowExt.includes(AXIS_DIRECTIVES.extraversion.low), 'low extraversion -> the terse length directive');
+  record('V2 PASSED: stance (dominance) and length (extraversion) directives track their axis, high and low');
+
+  // V3: coherence sweep — every combination of low/mid/high across all 5 axes
+  // (3^5 = 243). For each: the set is non-empty and within the cap; every
+  // selected directive belongs to a DISTINCT axis (proving <=1 per axis AND
+  // orthogonality); and no two selected lines are a declared conflicting pair
+  // (CONFLICTING_PAIRS stays empty — the orthogonal-facet design proven, not
+  // assumed). A single collision anywhere in the 243 fails the run.
+  assert.equal(CONFLICTING_PAIRS.length, 0, 'the orthogonal-facet design keeps the conflict set empty');
+  const LEVELS = [2, 5, 8]; // low / mid / high
+  const AX = ['dominance', 'agreeableness', 'extraversion', 'conscientiousness', 'openness'];
+  let swept = 0;
+  for (const d of LEVELS) for (const a of LEVELS) for (const e of LEVELS) for (const c of LEVELS) for (const o of LEVELS) {
+    const axes = { dominance: d, agreeableness: a, extraversion: e, conscientiousness: c, openness: o };
+    const directives = deriveVoiceDirectives(axes);
+    assert.ok(directives.length >= 1 && directives.length <= MAX_DIRECTIVES, 'directive count within [1, cap]');
+    const axesUsed = directives.map((line) => directiveAxis.get(line)).filter(Boolean);
+    // Every non-fallback directive maps to a distinct axis.
+    if (axesUsed.length === directives.length) {
+      assert.equal(new Set(axesUsed).size, axesUsed.length, 'each selected directive comes from a distinct axis facet');
+    }
+    for (let i = 0; i < directives.length; i++) {
+      for (let j = i + 1; j < directives.length; j++) {
+        const pair = [directives[i], directives[j]];
+        const clash = CONFLICTING_PAIRS.some(([x, y]) => (pair.includes(x) && pair.includes(y)));
+        assert.ok(!clash, 'no selected pair may be a declared conflicting pair');
+      }
+    }
+    swept += 1;
+  }
+  record(`V3 PASSED: all ${swept} axis combinations yield a non-empty, capped, single-facet-per-axis directive set with zero conflicting pairs`);
+}
+
+const sectionVLinesA = [];
+runSectionV((m) => { sectionVLinesA.push(m); console.log(m); });
+const sectionVLinesB = [];
+runSectionV((m) => sectionVLinesB.push(m));
+assert.deepEqual(sectionVLinesA, sectionVLinesB, 'Section V output must be byte-identical across two full runs');
+console.log(`V-final PASSED: Section V produced identical output across two full runs (${sectionVLinesA.length} lines)`);
+
+// =============================================================================
+// Section EM: emotion — a TRANSIENT per-turn read, derived fresh from recent
+// memories + axes and STORED NOWHERE. The load-bearing property: even though
+// nothing is cached, the read is fully reproducible from history (the log
+// supplies each memory's valence by seq), the same discipline relationshipTier
+// applies. Valence SIGN picks the family; the axes pick which member of that
+// family and how loud.
+// =============================================================================
+console.log('\n=== Section EM: procedural emotion (transient, derived, reproducible) ===');
+
+function runSectionEM(record) {
+  // A synthetic log where log[seq].type is the remembered event, plus the
+  // matching MemoryRefs. No world needed — deriveEmotion is pure over these.
+  const mkLog = (types) => types.map((type, seq) => ({ seq, type }));
+  const mkMemories = (types) => types.map((_, seq) => ({ seq, summary: `m${seq}` }));
+  const npcWith = (axes) => ({ psychology: { personalityAxes: axes } });
+
+  const NEGATIVE = new Set(['indignant', 'angry', 'resentful', 'hurt', 'wary']);
+  const POSITIVE = new Set(['fond', 'grateful', 'delighted', 'pleased']);
+  const NEUTRAL = new Set(['content', 'reserved', 'calm']);
+  const ANGER = new Set(['indignant', 'angry']);
+  const FEAR_HURT = new Set(['hurt', 'wary']);
+
+  const balancedAxes = { dominance: 5, agreeableness: 5, extraversion: 5, conscientiousness: 5, openness: 5 };
+
+  // EM1: determinism — same (axes, memories, log) reproduces the same read, on
+  // repeat and on a freshly-rebuilt set of identical inputs. Nothing is stored.
+  const robTypes = ['PLAYER_ROBBED'];
+  const read1 = deriveEmotion(npcWith(balancedAxes), mkMemories(robTypes), mkLog(robTypes));
+  const read2 = deriveEmotion(npcWith(balancedAxes), mkMemories(robTypes), mkLog(robTypes));
+  assert.deepEqual(read1, read2, 'same history + axes must reproduce the same emotional read');
+  assert.ok(read1.reads.length >= 1, 'a read always names at least one emotion');
+  record(`EM1 PASSED: identical history reproduces the read [${read1.reads.map((r) => r.emotion).join(', ')}] (netValence ${read1.netValence}) — reproducible without storage`);
+
+  // EM2: valence sign drives the family.
+  const robbed = deriveEmotion(npcWith(balancedAxes), mkMemories(['PLAYER_ROBBED']), mkLog(['PLAYER_ROBBED']));
+  const helped = deriveEmotion(npcWith(balancedAxes), mkMemories(['PLAYER_HELPED']), mkLog(['PLAYER_HELPED']));
+  assert.ok(NEGATIVE.has(robbed.reads[0].emotion), `robbed -> a negative-family read (got ${robbed.reads[0].emotion})`);
+  assert.ok(POSITIVE.has(helped.reads[0].emotion), `helped -> a positive-family read (got ${helped.reads[0].emotion})`);
+  record(`EM2 PASSED: ROBBED -> ${robbed.reads[0].emotion} (negative), HELPED -> ${helped.reads[0].emotion} (positive)`);
+
+  // EM3: same negative memory, opposite dominance -> anger-family vs fear/hurt.
+  const domHigh = { ...balancedAxes, dominance: 9 };
+  const domLow = { ...balancedAxes, dominance: 1 };
+  const angry = deriveEmotion(npcWith(domHigh), mkMemories(['PLAYER_ROBBED']), mkLog(['PLAYER_ROBBED']));
+  const afraid = deriveEmotion(npcWith(domLow), mkMemories(['PLAYER_ROBBED']), mkLog(['PLAYER_ROBBED']));
+  assert.ok(ANGER.has(angry.reads[0].emotion), `high dominance + robbed -> anger family (got ${angry.reads[0].emotion})`);
+  assert.ok(FEAR_HURT.has(afraid.reads[0].emotion), `low dominance + robbed -> fear/hurt family (got ${afraid.reads[0].emotion})`);
+  record(`EM3 PASSED: same robbery reads as ${angry.reads[0].emotion} for a dominant NPC vs ${afraid.reads[0].emotion} for a submissive one`);
+
+  // EM4: no memories -> a neutral-family baseline, still shaped by axes.
+  const outgoing = deriveEmotion(npcWith({ ...balancedAxes, extraversion: 9, agreeableness: 8 }), [], []);
+  const withdrawn = deriveEmotion(npcWith({ ...balancedAxes, extraversion: 1 }), [], []);
+  assert.ok(NEUTRAL.has(outgoing.reads[0].emotion), `no memories -> neutral baseline (got ${outgoing.reads[0].emotion})`);
+  assert.equal(outgoing.netValence, 0, 'no valenced memories -> zero net valence');
+  assert.equal(outgoing.reads[0].emotion, 'content', 'an outgoing, agreeable NPC baselines as content');
+  assert.equal(withdrawn.reads[0].emotion, 'reserved', 'a withdrawn NPC baselines as reserved');
+  record(`EM4 PASSED: no-memory baseline is axis-shaped — outgoing -> ${outgoing.reads[0].emotion}, withdrawn -> ${withdrawn.reads[0].emotion}`);
+
+  // EM5: recency — a fresh positive memory outweighs an older negative one.
+  const mixed = ['PLAYER_ROBBED', 'PLAYER_HELPED']; // older robbed, newer helped
+  const recent = deriveEmotion(npcWith(balancedAxes), mkMemories(mixed), mkLog(mixed));
+  assert.ok(recent.netValence > 0, 'the more recent HELPED must outweigh the older ROBBED');
+  assert.ok(POSITIVE.has(recent.reads[0].emotion), `recency tips the read positive (got ${recent.reads[0].emotion})`);
+  record(`EM5 PASSED: recency weighting — older robbery + newer help reads as ${recent.reads[0].emotion} (netValence ${recent.netValence})`);
+}
+
+const sectionEMLinesA = [];
+runSectionEM((m) => { sectionEMLinesA.push(m); console.log(m); });
+const sectionEMLinesB = [];
+runSectionEM((m) => sectionEMLinesB.push(m));
+assert.deepEqual(sectionEMLinesA, sectionEMLinesB, 'Section EM output must be byte-identical across two full runs');
+console.log(`EM-final PASSED: Section EM produced identical output across two full runs (${sectionEMLinesA.length} lines)`);
+
+console.log('\nSection V+EM PASSED: voice directives are permanent, axis-derived, and coherent by construction; emotion is a transient per-turn read that is reproducible from history yet stored nowhere');
+
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
-// transport plumbing, and fallback + contract enforcement. Real live-AI
-// verification can only happen by hand inside an actual Perchance page.
+// transport plumbing, fallback + contract enforcement, memory fan-out, and the
+// permanent-voice / transient-emotion derivations. Real live-AI verification
+// (dialogue lines AND memory-summary lines) can only happen by hand inside an
+// actual Perchance page.
 console.log('\nALL CHECKS PASSED');

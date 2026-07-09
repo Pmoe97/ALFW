@@ -8,6 +8,7 @@
 import { buildDialoguePrompt } from './buildDialoguePrompt.js';
 import { generateDialogue } from './generateDialogue.js';
 import { fallbackDialogue } from './fallbackDialogue.js';
+import { deriveEmotion } from '../entities/deriveEmotion.js';
 import { log } from '../debugLog.js';
 
 /**
@@ -15,10 +16,16 @@ import { log } from '../debugLog.js';
  * @param {Object} relationship - the NPC→player edge
  * @param {Array<{seq: number, summary: string}>} recentMemories
  * @param {string} playerInput
+ * @param {Array} [eventLog] - the world event log, used to derive the NPC's
+ *   transient per-turn emotion (deriveEmotion looks up each memory's valence by
+ *   seq). Defaults to [] -> a calm, axis-shaped baseline read.
  * @returns {Promise<{source: 'ai'|'fallback', response: import('./responseContract.js').DialogueResponse}>}
  */
-export async function getDialogue(entity, relationship, recentMemories, playerInput) {
-  const prompt = buildDialoguePrompt(entity, relationship, recentMemories, playerInput);
+export async function getDialogue(entity, relationship, recentMemories, playerInput, eventLog = []) {
+  // Emotion is derived fresh here (never stored) and passed into the pure prompt
+  // builder as its own transient section, distinct from the permanent voice.
+  const emotion = deriveEmotion(entity, recentMemories, eventLog);
+  const prompt = buildDialoguePrompt(entity, relationship, recentMemories, playerInput, emotion);
   const attempt = await generateDialogue(prompt);
 
   if (attempt.ok) {

@@ -43,6 +43,7 @@ import {
   ATTRIBUTE_NAMES,
 } from '../entities/entitySchema.js';
 import { PERSONALITY_AXES } from '../entities/raceRegistry.js';
+import { deriveVoiceDirectives } from '../entities/voice.js';
 
 export const NODE_POPULATED = 'NODE_POPULATED';
 
@@ -123,8 +124,8 @@ const HOBBIES = Object.freeze(['whittling', 'card games', 'dice', 'fishing', 'go
 const LIKES = Object.freeze(['a warm meal', 'fair trade', 'quiet mornings', 'a good story', 'strong drink', 'festival days', 'honest work', 'rainy evenings']);
 const DISLIKES = Object.freeze(['cheats', 'crowds', 'being lied to', 'cold winters', 'debt', 'pushy strangers', 'spoiled food', 'idle hands']);
 const BASE_VOICE_ACCENTS = Object.freeze(['plain regional burr', 'soft rural drawl', 'clipped trade-road cadence']);
-const SPEECH_PATTERNS = Object.freeze(['plainspoken and direct', 'slow and deliberate', 'fast, words tumbling over each other', 'quiet, rarely more than a sentence', 'wry, fond of understatement']);
-const VOICE_TAGS = Object.freeze(['low', 'warm', 'gravelly', 'bright', 'even', 'reedy', 'husky']);
+// speechPattern / voice-tag pools are gone: voice directives now derive from
+// personality axes (entities/voice.js), not from independent flavor rolls.
 const INTIMATE_GENITAL_BY_GENDER = Object.freeze({ female: 'vulva', male: 'penis' });
 const INTIMATE_SHAPE_SIZES = Object.freeze(['petite', 'average', 'generous']);
 
@@ -273,13 +274,19 @@ export function deriveNpc(config, node, enabledRaces, i) {
   const secondary = {};
   for (const skill of SECONDARY_SKILLS) secondary[skill] = Math.floor(rng() * 3);
 
-  // 14. flavor — hobbies/likes/dislikes and voice.
+  // 14. flavor — hobbies/likes/dislikes and voice. Accent stays a permanent
+  // independent roll (a cultural/racial trait). Voice DIRECTIVES, by contrast,
+  // are DERIVED from this NPC's already-drawn personalityAxes (step 11) via
+  // deriveVoiceDirectives — consuming ZERO rng — so voice finally reflects
+  // personality (the FUOC intent). Removing the old independent speechPattern
+  // and voice-tag draws that used to sit here shifts no other field's draw:
+  // they were the LAST draws in deriveNpc, so every earlier field stays
+  // byte-identical; only voice's shape changes.
   const hobbies = pickTwo(rng, HOBBIES);
   const likes = pickTwo(rng, LIKES);
   const dislikes = pickTwo(rng, DISLIKES);
   const accent = pick(rng, race.voiceAccents ?? BASE_VOICE_ACCENTS);
-  const speechPattern = pick(rng, SPEECH_PATTERNS);
-  const tags = pickTwo(rng, VOICE_TAGS);
+  const voiceDirectives = deriveVoiceDirectives(personalityAxes);
 
   const place = kind === 'settlement' ? node.classification.settlementId : 'the wilds';
   return createNpc({
@@ -309,7 +316,7 @@ export function deriveNpc(config, node, enabledRaces, i) {
       hobbies,
       likes,
       dislikes,
-      voice: { accent, speechPattern, tags },
+      voice: { accent, directives: voiceDirectives },
       memories: [],
       flags: { personality: [], condition: [], aiDirectives: [] },
     },
@@ -398,6 +405,16 @@ export function createNpcGeneratorEngine(world, registry, races) {
     return populatedByNode.has(node.id);
   }
 
+  // rosterIdsAt — read-only: the ids of the NPCs committed at a node, [] if it
+  // was never populated. Exposes the existing populatedByNode cache (no new
+  // stored state) so the memory engine can answer "who else is here" for
+  // witness fan-out. This is the codebase's only current location signal — the
+  // node an NPC was generated at — and is the honest STAND-IN for real
+  // presence/schedule tracking, which does not exist yet.
+  function rosterIdsAt(nodeId) {
+    return populatedByNode.get(nodeId) ?? [];
+  }
+
   // rebuildNodePopulation — the node's birth snapshots recomputed from the log
   // alone, ignoring the cache. Matching ids against the cache is the
   // rebuildability proof. Deliberately proves birth snapshots, NOT live entity
@@ -407,5 +424,5 @@ export function createNpcGeneratorEngine(world, registry, races) {
     return deriveNodePopulation(world.getEventLog(), nodeId);
   }
 
-  return { populateNode, getPopulation, isPopulated, rebuildNodePopulation };
+  return { populateNode, getPopulation, isPopulated, rosterIdsAt, rebuildNodePopulation };
 }

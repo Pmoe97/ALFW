@@ -19,9 +19,13 @@ import { relationshipTier } from '../entities/relationshipStore.js';
  * @param {Array<{seq: number, summary: string}>} recentMemories - MemoryRefs
  *   chosen by the caller; no memory-selection logic lives here
  * @param {string} playerInput - the player's spoken line
+ * @param {{reads: Array<{emotion: string, band: string, intensity: number}>}} [emotion]
+ *   the TRANSIENT per-turn emotional read (entities/deriveEmotion.js), computed
+ *   by the caller and passed in so this function stays pure. Defaults to no
+ *   read -> a calm baseline line.
  * @returns {string} one flat instruction string
  */
-export function buildDialoguePrompt(entity, relationship, recentMemories, playerInput) {
+export function buildDialoguePrompt(entity, relationship, recentMemories, playerInput, emotion = { reads: [] }) {
   const identity = entity.identity;
   const psychology = entity.psychology;
   const lines = [];
@@ -54,11 +58,17 @@ export function buildDialoguePrompt(entity, relationship, recentMemories, player
   lines.push(`Hobbies: ${psychology.hobbies.join(', ')}`);
   lines.push('');
 
-  // Voice — from entity.psychology.voice.
-  lines.push('== Voice ==');
+  // Voice — PERMANENT, axis-derived speech directives (entities/voice.js),
+  // rendered at the SAME imperative prominence the hard-constraint aiDirectives
+  // get below (the FUOC lesson: a soft descriptive voice block was too weak to
+  // make NPCs sound distinct). This is who the NPC ALWAYS sounds like; it is
+  // deliberately a separate section from the transient emotional read further
+  // down, and the two never merge.
+  lines.push('== Voice (speak this way) ==');
   lines.push(`Accent: ${psychology.voice.accent}`);
-  lines.push(`Speech pattern: ${psychology.voice.speechPattern}`);
-  lines.push(`Voice tags: ${psychology.voice.tags.join(', ')}`);
+  for (const directive of psychology.voice.directives) {
+    lines.push(`- ALWAYS: ${directive}`);
+  }
   lines.push('');
 
   // Relationship — the NPC→player edge plus the derived tier.
@@ -78,6 +88,21 @@ export function buildDialoguePrompt(entity, relationship, recentMemories, player
   }
   lines.push(`- MUST: Stay in character as ${identity.firstName} at all times.`);
   lines.push('- MUST: Respond with ONLY the JSON object described under "Output format" below — no prose, no explanation, no markdown outside it.');
+  lines.push('');
+
+  // Current emotional state — TRANSIENT, recomputed every turn from recent
+  // memories + axes (entities/deriveEmotion.js) and stored nowhere. Kept
+  // strictly SEPARATE from the permanent Voice section above: voice is how the
+  // NPC always speaks; this is only how they FEEL right now, and it colors
+  // delivery for this turn alone.
+  lines.push('== Current emotional state ==');
+  if (emotion.reads.length > 0) {
+    const readText = emotion.reads.map((r) => `${r.emotion} (${r.band})`).join(', ');
+    lines.push(`Right now you are feeling: ${readText}.`);
+    lines.push('- Let this color HOW you deliver your reply — your tone and mood — not WHAT facts you know.');
+  } else {
+    lines.push('You feel calm and even right now.');
+  }
   lines.push('');
 
   // Memories — the caller-selected MemoryRefs (entitySchema MemoryRef).
