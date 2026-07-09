@@ -60,6 +60,19 @@ import {
   deriveInjectedPois,
   deriveBlindAttemptCount,
 } from './engines/poiEngine.js';
+import { createEntityRegistry } from './entities/entityRegistry.js';
+import {
+  createRaceRegistry,
+  deriveRaceRegistry,
+  PERSONALITY_AXES,
+} from './entities/raceRegistry.js';
+import {
+  createNpcGeneratorEngine,
+  deriveNpcRoster,
+  deriveNodePopulation,
+  derivePopulationSize,
+  NODE_POPULATED,
+} from './engines/npcGeneratorEngine.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
@@ -1850,6 +1863,358 @@ assert.deepEqual(sectionMLinesA, sectionMLinesB, 'Section M output must be byte-
 console.log(`M-final PASSED: Section M produced identical output across two full runs (${sectionMLinesA.length} lines)`);
 
 console.log('\nSection M PASSED: baseline POIs are a pure function of (seed, node) with classification-scaled richness; discovery/injection/reveal are log-derived and rebuildable; blind explore is a flat-chance draw over a finite shrinking pool; directed explore honors reveal authority; exploring costs time via the exploring timeContext');
+
+// =============================================================================
+// Section N: NPC generator — the live race registry -> per-node population.
+//
+// This layer contains a DESIGNED EXCEPTION to the position-determinism
+// discipline, and the section proves the exception is exactly as intended and
+// no wider. The raceRegistry is a live, player-adjustable settings surface;
+// generation reads its CURRENT state at the moment a node is first populated.
+// So: same seed + same node + DIFFERENT registry settings => different people
+// — N3 asserts this divergence as THE FEATURE, not a bug the suite should
+// catch. What remains deterministic, and is proven in the usual load-bearing
+// way: within a FIXED registry state the roster is a pure function of
+// (config, node, enabledRaces) (N1); a committed roster is a permanent
+// historical fact that registry edits can never reach backward and reroll
+// (N2, N3); and the registry itself plus every population is log-derived and
+// rebuildable (N4) — registry edits are logged events, so full-log replay
+// reproduces everything exactly even across settings changes.
+// =============================================================================
+console.log('\n=== Section N: NPC generator (live race registry -> per-node population) ===');
+
+function runSectionN(record) {
+  // Synthetic nodes with hand-authored classifications (the Section M
+  // convention, redefined locally so the section stays self-contained).
+  const synthSettlement = (tier, x, y) => ({
+    id: `syn_${tier}_${x}_${y}`,
+    x,
+    y,
+    classification: { kind: 'settlement', tier, settlementId: `syn_${tier}`, baselineFaction: null, notability: null, hospitability: null },
+  });
+  const synthWild = (notability, hospitability, x, y) => ({
+    id: `syn_wild_${x}_${y}`,
+    x,
+    y,
+    classification: { kind: 'wilderness', tier: null, settlementId: null, baselineFaction: null, notability, hospitability },
+  });
+
+  // popConfigWith — clone of the shipped config, with the race table optionally
+  // narrowed to a subset of the shipped races and per-race patches applied.
+  function popConfigWith(raceIds = null, racePatches = {}) {
+    const cfg = mapConfigWith();
+    if (raceIds) {
+      cfg.raceRegistry = {
+        races: Object.fromEntries(raceIds.map((id) => [id, structuredClone(mapBaseConfig.raceRegistry.races[id])])),
+      };
+    }
+    for (const [id, patch] of Object.entries(racePatches)) {
+      Object.assign(cfg.raceRegistry.races[id], patch);
+    }
+    return cfg;
+  }
+
+  // freshPopWorld — world + race registry + entity registry + generator, in
+  // the sampleWorld construction order (stores before any dispatch).
+  function freshPopWorld(cfg) {
+    const world = createWorldState(cfg);
+    const races = createRaceRegistry(world);
+    const registry = createEntityRegistry(world);
+    const npcGen = createNpcGeneratorEngine(world, registry, races);
+    return { world, races, registry, npcGen };
+  }
+
+  // The config-default enabled races in the generator's expected shape (sorted
+  // {id, ...def}), for calling the pure derivations without building a world.
+  function enabledRacesOf(cfg) {
+    const table = deriveRaceRegistry(cfg, []);
+    return Object.keys(table)
+      .sort()
+      .map((id) => ({ id, ...table[id] }))
+      .filter((r) => r.enabled && r.weight > 0);
+  }
+
+  // Deterministic scan for `count` village-tier synthetic nodes whose rosters
+  // (under the full shipped registry) each contain at least one NPC of raceId —
+  // so N3's divergence assertions are guaranteed, not probabilistic.
+  function findVillagesWithRace(cfg, raceId, count) {
+    const enabled = enabledRacesOf(cfg);
+    const found = [];
+    for (let i = 0; i < 5000 && found.length < count; i++) {
+      const x = (i % 100) * 7 + 2000;
+      const y = Math.floor(i / 100) * 7 + 2000;
+      const node = synthSettlement('village', x, y);
+      if (deriveNpcRoster(cfg, node, enabled).some((n) => n.identity.race === raceId)) found.push(node);
+    }
+    if (found.length < count) throw new Error(`Section N: fewer than ${count} villages containing race ${raceId} (config drift?)`);
+    return found;
+  }
+
+  const cfg = mapConfigWith();
+  const popByTier = cfg.worldMap.population.settlement.populationByTier;
+  const BASE_APPEARANCE_KEYS = ['heightBuild', 'hair', 'eyes', 'face', 'skin', 'body', 'distinguishingFeatures', 'intimate'];
+
+  // --- N1: fixed-registry determinism (LOAD-BEARING, K1/L1/M1 analogue) ------
+  // Within ONE registry state, generation is fully deterministic: two
+  // independent fresh worlds populate the same node with byte-identical birth
+  // snapshots, the pure derivation reproduces itself, and the committed
+  // snapshot IS the pure derivation's output.
+  //
+  // The clock-advanced world C is the age/birthday-purity check specifically:
+  // deriveNpc must be a pure function of (config, node, enabledRaces, i) with
+  // ZERO reference to WorldClockEngine's current date — age is a pure ageRange
+  // draw and birthday's year is config.startDateTime (a frozen constant), never
+  // "now". If any of that leaked the game clock, populating AFTER advancing
+  // time would shift ages/birthdays and this deepEqual would fail. It is what
+  // makes the determinism hold BY CONSTRUCTION rather than by the coincidence
+  // of A and B both populating at t=0.
+  {
+    const node = synthSettlement('village', 8000, 8000);
+    const A = freshPopWorld(popConfigWith());
+    const B = freshPopWorld(popConfigWith());
+    A.npcGen.populateNode(node);
+    B.npcGen.populateNode(node);
+    const snapA = deriveNodePopulation(A.world.getEventLog(), node.id);
+    const snapB = deriveNodePopulation(B.world.getEventLog(), node.id);
+    assert.equal(snapA.length, popByTier.village, 'a village commits populationByTier.village people');
+    assert.deepEqual(snapA, snapB, 'same registry + same node + same seed must yield byte-identical birth snapshots');
+    const enabled = A.races.getEnabledRaces();
+    assert.deepEqual(deriveNpcRoster(cfg, node, enabled), deriveNpcRoster(cfg, node, enabled), 'deriveNpcRoster is pure in (config, node, enabledRaces)');
+    assert.deepEqual(snapA, deriveNpcRoster(cfg, node, enabled), 'the committed snapshot equals the pure derivation output');
+    assert.ok(snapA.every((n, i) => n.id === `npc_${node.id}_g${i}`), 'generated ids are deterministic npc_<nodeId>_g<i>');
+
+    // World C: advance the game clock a long way (and past a birthday-year
+    // boundary) BEFORE populating, to prove generation ignores "now" entirely.
+    const C = freshPopWorld(popConfigWith());
+    const clockC = createWorldClockEngine(C.world);
+    C.world.dispatch('CLOCK_TICK', { realSecondsElapsed: 100000 });
+    assert.ok(clockC.getTotalGameSeconds() > 0, 'world C clock actually advanced before populating');
+    C.npcGen.populateNode(node);
+    const snapC = deriveNodePopulation(C.world.getEventLog(), node.id);
+    assert.deepEqual(snapC, snapA, 'populating AFTER advancing the game clock yields byte-identical people — age/birthday are pure RNG + frozen config.startDateTime, never the current date');
+    record(`N1 PASSED: village roster of ${snapA.length} NPCs is deterministic under a fixed registry — identical across two fresh worlds, equal to the pure derivation, and unchanged when populated after advancing the game clock (age/birthday clock-independent)`);
+  }
+
+  // --- N2: no-op on repeat + permanence of the committed roster ---------------
+  // A second populateNode returns the SAME live entities (never a reroll),
+  // post-birth mutation survives, exactly one NODE_POPULATED exists for the
+  // node, and the frozen birth snapshot is unaffected by live mutation.
+  {
+    const node = synthSettlement('town', 8100, 8100);
+    const { world, npcGen } = freshPopWorld(popConfigWith());
+    const first = npcGen.populateNode(node);
+    assert.ok(npcGen.isPopulated(node), 'the node is marked populated after the first call');
+    first[0].psychology.memories.push({ seq: 0, summary: 'a remembered kindness' });
+    const again = npcGen.populateNode(node);
+    assert.ok(again[0] === first[0], 'a repeat populateNode returns the same live entity references (no-op, not a regeneration)');
+    assert.equal(again[0].psychology.memories.length, 1, 'post-birth mutation on the live entity survives the repeat call');
+    const entries = world.getEventLog().filter((e) => e.type === NODE_POPULATED && e.payload.nodeId === node.id);
+    assert.equal(entries.length, 1, 'the log carries exactly ONE NODE_POPULATED for the node');
+    assert.equal(deriveNodePopulation(world.getEventLog(), node.id)[0].psychology.memories.length, 0, 'the birth snapshot in the log is unaffected by live mutation — birth record and live entity diverge by design');
+    record(`N2 PASSED: repeat population is a no-op returning the committed live entities; one NODE_POPULATED in the log; birth snapshot immune to post-birth mutation`);
+  }
+
+  // --- N3: INTENTIONAL non-determinism across a registry change ---------------
+  // THE FEATURE, NOT A BUG: generation reads the CURRENT registry, so an edit
+  // changes who future nodes get — while every already-committed roster is
+  // byte-untouched. A control world on the same seed with unedited settings
+  // gets DIFFERENT people at the same node, which is exactly the designed
+  // exception to position-determinism.
+  {
+    const [nodeA, nodeB] = findVillagesWithRace(cfg, 'elf', 2);
+    const edited = freshPopWorld(popConfigWith());
+    const control = freshPopWorld(popConfigWith());
+
+    edited.npcGen.populateNode(nodeA);
+    const snapABefore = deriveNodePopulation(edited.world.getEventLog(), nodeA.id);
+    assert.ok(snapABefore.some((n) => n.identity.race === 'elf'), 'nodeA was committed WITH elves before the edit');
+
+    edited.races.setRaceEnabled('elf', false);
+    assert.ok(!edited.races.getEnabledRaces().some((r) => r.id === 'elf'), 'elf is disabled in the live registry');
+
+    edited.npcGen.populateNode(nodeB);
+    const snapAAfter = deriveNodePopulation(edited.world.getEventLog(), nodeA.id);
+    assert.deepEqual(snapAAfter, snapABefore, 'the edit did NOT reach backward: nodeA is byte-unchanged, its elves intact');
+    const editedB = deriveNodePopulation(edited.world.getEventLog(), nodeB.id);
+    assert.ok(editedB.every((n) => n.identity.race !== 'elf'), 'nodeB, populated AFTER the edit, contains no elves');
+
+    control.npcGen.populateNode(nodeB);
+    const controlB = deriveNodePopulation(control.world.getEventLog(), nodeB.id);
+    assert.ok(controlB.some((n) => n.identity.race === 'elf'), 'the control world (unedited settings) gets elves at the same node');
+    assert.notDeepEqual(editedB, controlB, 'same seed + same node + DIFFERENT registry settings => different people — the intentional exception to position-determinism');
+
+    const editedLog = edited.world.getEventLog();
+    const seqA = editedLog.find((e) => e.type === NODE_POPULATED && e.payload.nodeId === nodeA.id).seq;
+    const seqEdit = editedLog.find((e) => e.type === 'RACE_ENABLED_SET').seq;
+    const seqB = editedLog.find((e) => e.type === NODE_POPULATED && e.payload.nodeId === nodeB.id).seq;
+    assert.ok(seqA < seqEdit && seqEdit < seqB, 'the settings edit is itself a logged fact, ordered between the two populations — full-log replay reproduces everything');
+    record(`N3 PASSED: registry edit changed only FUTURE generation (nodeB elf-free, control world diverges by design) and left the committed nodeA byte-untouched`);
+  }
+
+  // --- N4: registry + population caches provably redundant (M6 analogue) ------
+  // After live edits (add/remove/toggle/reweight) and several populations, the
+  // race-table cache equals its from-log rebuild and every node's cached
+  // roster equals its from-log rebuild. Unknown-id mutators are null no-ops.
+  {
+    const { world, races, npcGen } = freshPopWorld(popConfigWith());
+    races.addRace('synthling', {
+      displayName: 'Synthling',
+      enabled: true,
+      weight: 5,
+      genders: ['female', 'male'],
+      namePool: { female: ['Vessa', 'Nyx'], male: ['Koda', 'Rill'] },
+      surnames: ['Weft'],
+      ageRange: { min: 18, max: 40 },
+      axisPriors: { openness: 8 },
+      appearanceOverrides: {},
+      appearanceExtensions: { seam: ['visible silver seams', 'faint hairline seams'] },
+      voiceAccents: ['flat harmonic hum'],
+    });
+    races.setRaceWeight('orc', 7);
+    races.setRaceEnabled('gnome', false);
+    races.removeRace('halfling');
+
+    assert.equal(races.getRace('halfling'), null, 'a removed race is gone from the accessor');
+    assert.ok(!races.getEnabledRaces().some((r) => r.id === 'gnome'), 'a disabled race is filtered from getEnabledRaces');
+    assert.equal(races.getRace('orc').weight, 7, 'a reweighted race reads back its new weight');
+    assert.equal(races.getRace('synthling').displayName, 'Synthling', 'a player-added race is a first-class registry entry');
+    assert.equal(races.removeRace('no_such_race'), null, 'unknown-id removeRace is a null no-op (nothing dispatched)');
+    assert.equal(races.setRaceEnabled('no_such_race', true), null, 'unknown-id setRaceEnabled is a null no-op');
+    assert.equal(races.setRaceWeight('no_such_race', 2), null, 'unknown-id setRaceWeight is a null no-op');
+
+    const n1 = synthSettlement('hamlet', 9000, 9000);
+    const n2 = synthWild(0.9, 0.8, 9100, 9100);
+    npcGen.populateNode(n1);
+    npcGen.populateNode(n2);
+
+    assert.deepEqual(races.getRaces(), races.rebuildRaces(), 'the race-table cache must rebuild from config defaults + the log alone');
+    for (const node of [n1, n2]) {
+      const rebuilt = npcGen.rebuildNodePopulation(node.id);
+      assert.deepEqual(npcGen.getPopulation(node).map((n) => n.id), rebuilt.map((n) => n.id), `node ${node.id}: cached roster ids must equal the from-log rebuild`);
+      assert.deepEqual(npcGen.getPopulation(node), rebuilt, `node ${node.id}: unmutated live entities equal their birth snapshots`);
+    }
+    assert.equal(deriveNodePopulation(world.getEventLog(), 'never_populated_node').length, 0, 'an unpopulated node rebuilds to an empty roster');
+    record(`N4 PASSED: after add/remove/toggle/reweight edits and two populations, the race table and every roster rebuild from the log exactly; unknown-id mutators are null no-ops`);
+  }
+
+  // --- N5: race appearance-extension merge (the FUOC fix) ---------------------
+  // A dragonborn gets its declared extension fields ADDED onto the shared base
+  // appearance; a human's appearance is EXACTLY the base key set — the common
+  // race is an ordinary zero-extension registry entry, not a special case.
+  {
+    const node = synthSettlement('village', 9200, 9200);
+    const db = freshPopWorld(popConfigWith(['dragonborn']));
+    const dbRoster = db.npcGen.populateNode(node);
+    const ext = mapBaseConfig.raceRegistry.races.dragonborn.appearanceExtensions;
+    assert.ok(dbRoster.length > 0, 'the dragonborn-only world populated the village');
+    for (const n of dbRoster) {
+      assert.equal(n.identity.race, 'dragonborn', 'a single-race registry generates only that race');
+      for (const key of BASE_APPEARANCE_KEYS) assert.ok(key in n.appearance, `base appearance key ${key} is present`);
+      for (const [field, options] of Object.entries(ext)) {
+        assert.ok(options.includes(n.appearance[field]), `extension ${field} is drawn from its declared option list`);
+      }
+    }
+    const hu = freshPopWorld(popConfigWith(['human']));
+    const huRoster = hu.npcGen.populateNode(node);
+    for (const n of huRoster) {
+      assert.deepEqual(Object.keys(n.appearance).sort(), [...BASE_APPEARANCE_KEYS].sort(), 'a human appearance carries EXACTLY the base keys — zero extensions, zero special-casing');
+    }
+    record(`N5 PASSED: dragonborn instances carry ${Object.keys(ext).length} merged extension fields on top of the intact base schema; human instances carry exactly the base keys`);
+  }
+
+  // --- N6: personality axes — race priors + bounded deterministic variance ----
+  // Every axis is an integer in [0,10] within +/-2 of its race prior; the prior
+  // skew is visible in aggregate (orc dominance prior 8 vs human 5).
+  {
+    const humanOnly = popConfigWith(['human']);
+    const orcOnly = popConfigWith(['orc']);
+    const nodes = [synthSettlement('town', 9300, 9300), synthSettlement('town', 9350, 9350), synthSettlement('village', 9400, 9400)];
+    const sample = (cfg2) => nodes.flatMap((node) => deriveNpcRoster(cfg2, node, enabledRacesOf(cfg2)));
+    const humans = sample(humanOnly);
+    const orcs = sample(orcOnly);
+    for (const [raceId, list] of [['human', humans], ['orc', orcs]]) {
+      const priors = mapBaseConfig.raceRegistry.races[raceId].axisPriors;
+      for (const npc of list) {
+        for (const axis of PERSONALITY_AXES) {
+          const v = npc.psychology.personalityAxes[axis];
+          assert.ok(Number.isInteger(v) && v >= 0 && v <= 10, `${raceId} ${axis} must be an integer in [0,10] (saw ${v})`);
+          assert.ok(Math.abs(v - (priors[axis] ?? 5)) <= 2, `${raceId} ${axis} must sit within +/-2 of its race prior`);
+        }
+      }
+    }
+    const mean = (list, axis) => list.reduce((s, n) => s + n.psychology.personalityAxes[axis], 0) / list.length;
+    const orcDom = mean(orcs, 'dominance');
+    const humanDom = mean(humans, 'dominance');
+    assert.ok(orcDom > humanDom, `the dominance prior gap must show in aggregate (orc ${orcDom} > human ${humanDom})`);
+    record(`N6 PASSED: all ${humans.length + orcs.length} sampled NPCs keep every axis in [0,10] within +/-2 of their race prior; mean orc dominance ${orcDom.toFixed(2)} > mean human dominance ${humanDom.toFixed(2)}`);
+  }
+
+  // --- N7: population counts follow the classification the map already made ---
+  // Settlement counts are the flat per-tier lookup; wilderness follows the
+  // notability/hospitability formula — hostile mundane wilderness holds NOBODY
+  // yet still commits its (empty) roster as a fact, so it stays barren no
+  // matter what races are enabled later.
+  {
+    const { world, npcGen } = freshPopWorld(popConfigWith());
+    const hamlet = npcGen.populateNode(synthSettlement('hamlet', 9500, 9500));
+    const capital = npcGen.populateNode(synthSettlement('capital', 9600, 9600));
+    assert.equal(hamlet.length, popByTier.hamlet, 'hamlet population equals its per-tier lookup');
+    assert.equal(capital.length, popByTier.capital, 'capital population equals its per-tier lookup');
+
+    const barren = synthWild(0, 0, 9700, 9700);
+    assert.equal(npcGen.populateNode(barren).length, 0, 'hostile, mundane wilderness generates nobody');
+    assert.ok(npcGen.isPopulated(barren), 'the empty roster is itself a committed fact');
+    npcGen.populateNode(barren); // revisit
+    const barrenEntries = world.getEventLog().filter((e) => e.type === NODE_POPULATED && e.payload.nodeId === barren.id);
+    assert.equal(barrenEntries.length, 1, 'revisiting the empty node is a no-op (still exactly one NODE_POPULATED)');
+
+    const w = cfg.worldMap.population.wilderness;
+    const rich = npcGen.populateNode(synthWild(0.9, 0.8, 9800, 9800));
+    assert.ok(rich.length > 0, 'a notable, hospitable wilderness node holds a hermit or small camp');
+    assert.ok(rich.length <= w.maxPopulation, 'wilderness population respects maxPopulation');
+    assert.equal(
+      derivePopulationSize(cfg, synthWild(0.9, 0.8, 0, 0).classification),
+      Math.round(w.base + 0.9 * w.notabilityPopScale + 0.8 * w.hospitabilityPopScale),
+      'the wilderness count is the clamped notability/hospitability formula'
+    );
+    record(`N7 PASSED: hamlet ${hamlet.length} / capital ${capital.length} per tier lookup; barren wilderness 0 (committed, no-op on revisit); notable wilderness ${rich.length}`);
+  }
+
+  // --- N8: registry weights drive the race mix ---------------------------------
+  {
+    const skew = popConfigWith(['human', 'elf'], { human: { weight: 100 }, elf: { weight: 1 } });
+    const { npcGen } = freshPopWorld(skew);
+    let humans = 0;
+    let elves = 0;
+    for (let k = 0; k < 6; k++) {
+      for (const n of npcGen.populateNode(synthSettlement('town', 10000 + k * 50, 10000))) {
+        if (n.identity.race === 'human') humans += 1;
+        else elves += 1;
+      }
+    }
+    assert.ok(humans > elves, `a 100:1 weight skew must dominate the mix (${humans} humans vs ${elves} elves)`);
+    record(`N8 PASSED: at 100:1 registry weights, six towns generated ${humans} humans vs ${elves} elves`);
+  }
+}
+
+// N1-N8, printed once.
+const sectionNLinesA = [];
+runSectionN((m) => {
+  sectionNLinesA.push(m);
+  console.log(m);
+});
+
+// --- N-final: determinism across full runs (K6/L7/M-final analogue) ----------
+// Run the entire section a second time and assert byte-identical output. This
+// holds BECAUSE every scenario pins its own registry state — the intentional
+// non-determinism is across differing SETTINGS, never across runs of the same
+// settings.
+const sectionNLinesB = [];
+runSectionN((m) => sectionNLinesB.push(m));
+assert.deepEqual(sectionNLinesA, sectionNLinesB, 'Section N output must be byte-identical across two full runs');
+console.log(`N-final PASSED: Section N produced identical output across two full runs (${sectionNLinesA.length} lines)`);
+
+console.log('\nSection N PASSED: rosters are deterministic under a fixed registry state and committed permanently as NODE_POPULATED birth snapshots; registry edits are logged settings facts that change only future generation (the designed exception to position-determinism); race extension fields merge additively onto the untouched base appearance; axes are race priors plus bounded seeded variance; population counts reuse the classification layer');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed

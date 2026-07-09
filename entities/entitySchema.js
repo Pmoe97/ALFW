@@ -127,8 +127,9 @@ export function createNpc({ schedule = [], ...base }) {
 
 // Which attribute backs each primary skill's effective-value bonus.
 // Provisional RPG-convention mapping — this is the only place it's defined,
-// adjust here if the pairing needs to change.
-const PRIMARY_SKILL_ATTRIBUTE = {
+// adjust here if the pairing needs to change. Exported so the NPC generator can
+// iterate the primary-skill roster (Object.keys order) instead of duplicating it.
+export const PRIMARY_SKILL_ATTRIBUTE = {
   athletics: 'strength',
   acrobatics: 'agility',
   sleightOfHand: 'agility',
@@ -147,6 +148,18 @@ const PRIMARY_SKILL_ATTRIBUTE = {
   survival: 'insight',
   medicine: 'insight',
 };
+
+// Runtime rosters for the secondary skills and attributes documented in the
+// typedefs above (typedefs are erased at runtime, so iterating code needs a
+// value). The single source of truth for these name lists — the NPC generator
+// iterates them in this exact order as part of its fixed-draw-order contract.
+export const SECONDARY_SKILLS = Object.freeze([
+  'riding', 'dancing', 'swimming', 'cleaning', 'disguise',
+  'hands', 'mouth', 'breasts', 'vagina', 'anus',
+]);
+export const ATTRIBUTE_NAMES = Object.freeze([
+  'strength', 'agility', 'toughness', 'charisma', 'intelligence', 'insight',
+]);
 
 /**
  * Effective value of a primary skill = raw invested value +
