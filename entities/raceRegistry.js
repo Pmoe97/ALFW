@@ -86,8 +86,21 @@ function validateRaceDef(id, def) {
       }
     }
   }
-  if (def.voiceAccents !== undefined && (!Array.isArray(def.voiceAccents) || def.voiceAccents.length === 0)) {
-    fail('voiceAccents, if present, must be a non-empty array');
+  if (def.voiceAccents !== undefined) {
+    if (!Array.isArray(def.voiceAccents) || def.voiceAccents.length === 0) {
+      fail('voiceAccents, if present, must be a non-empty array');
+    }
+    for (const accent of def.voiceAccents) {
+      if (!accent || typeof accent !== 'object' || typeof accent.name !== 'string' || accent.name === '') {
+        fail('each voiceAccents entry must be an object with a non-empty string "name"');
+      }
+      if (
+        accent.signaturePhrases !== undefined &&
+        (!Array.isArray(accent.signaturePhrases) || accent.signaturePhrases.some((p) => typeof p !== 'string'))
+      ) {
+        fail(`voiceAccents entry "${accent.name}" signaturePhrases, if present, must be an array of strings`);
+      }
+    }
   }
 }
 

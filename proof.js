@@ -175,6 +175,7 @@ const mira = createNpc({
         'Stay warm underneath, even when your patience is running short.',
         'Keep it short and get to what someone actually needs.',
       ],
+      phrases: ['reckon', 'no trouble at all', 'mind yourself', 'settle up', 'there now'],
     },
     memories: [], // filled in below once the referenced event has a seq
     flags: { personality: ['stubborn'], condition: [], aiDirectives: [] },
@@ -242,6 +243,7 @@ const rowan = createPlayer({
         'Say little; keep replies terse and understated.',
         'Lean dry and wry rather than warm.',
       ],
+      phrases: ['fair enough', "won't lie", 'no matter', 'obliged', 'long as it keeps'],
     },
     memories: [],
     flags: { personality: ['wary of strangers'], condition: [], aiDirectives: [] },
@@ -2141,7 +2143,7 @@ function runSectionN(record) {
       axisPriors: { openness: 8 },
       appearanceOverrides: {},
       appearanceExtensions: { seam: ['visible silver seams', 'faint hairline seams'] },
-      voiceAccents: ['flat harmonic hum'],
+      voiceAccents: [{ name: 'flat harmonic hum', signaturePhrases: ['click-affirm', 'tone-null', 'ping'] }],
     });
     races.setRaceWeight('orc', 7);
     races.setRaceEnabled('gnome', false);
@@ -2368,6 +2370,112 @@ const sectionVLinesB = [];
 runSectionV((m) => sectionVLinesB.push(m));
 assert.deepEqual(sectionVLinesA, sectionVLinesB, 'Section V output must be byte-identical across two full runs');
 console.log(`V-final PASSED: Section V produced identical output across two full runs (${sectionVLinesA.length} lines)`);
+
+// =============================================================================
+// Section AP: accent signature phrases — a small curated seed list per accent,
+// snapshotted onto psychology.voice.phrases at NPC birth (deriveNpc, step 14)
+// alongside the accent name itself. Never re-looked-up from the race registry
+// at prompt-build time: buildDialoguePrompt only ever reads the entity's own
+// already-snapshotted voice object, so the birth-time value IS the permanent
+// value regardless of what the registry says afterward.
+// =============================================================================
+console.log('\n=== Section AP: accent signature phrases (permanent, full coverage) ===');
+
+function runSectionAP(record) {
+  // AP0: full-coverage audit — every accent declared on every shipped race has
+  // a non-empty signaturePhrases list. A future accent added without one would
+  // fail here rather than silently rendering a bare accent name forever.
+  const races = deriveRaceRegistry(mapConfigWith(), []);
+  let accentCount = 0;
+  for (const [raceId, def] of Object.entries(races)) {
+    assert.ok(Array.isArray(def.voiceAccents) && def.voiceAccents.length > 0, `race "${raceId}" must declare voiceAccents`);
+    for (const accent of def.voiceAccents) {
+      assert.equal(typeof accent.name, 'string', `race "${raceId}" accent must have a string name`);
+      assert.ok(
+        Array.isArray(accent.signaturePhrases) && accent.signaturePhrases.length > 0,
+        `race "${raceId}" accent "${accent.name}" must have a non-empty signaturePhrases list`
+      );
+      accentCount += 1;
+    }
+  }
+  record(`AP0 PASSED: all ${accentCount} declared accents across ${Object.keys(races).length} races carry a non-empty signaturePhrases list`);
+
+  // AP1: snapshot permanence — deriveNpcRoster is pure, so the SAME (config,
+  // node, enabledRaces) reproduces byte-identical accent + phrases, proving
+  // the phrase list is captured once at birth, not re-derived per call. The
+  // snapshotted list is also checked to equal the registry accent entry's
+  // signaturePhrases at generation time — a direct deterministic lookup on
+  // the roll, never an independent draw of its own.
+  const cfg = mapConfigWith();
+  const enabled = Object.keys(races)
+    .sort()
+    .map((id) => ({ id, ...races[id] }))
+    .filter((r) => r.enabled && r.weight > 0);
+  const node = {
+    id: 'syn_ap_village',
+    x: 9500,
+    y: 9500,
+    classification: { kind: 'settlement', tier: 'village', settlementId: 'syn_ap_village', baselineFaction: null, notability: null, hospitability: null },
+  };
+  const rosterA = deriveNpcRoster(cfg, node, enabled);
+  const rosterB = deriveNpcRoster(cfg, node, enabled);
+  assert.ok(rosterA.length > 0, 'the synthetic village node must actually populate for this check to mean anything');
+  assert.deepEqual(
+    rosterA.map((n) => n.psychology.voice),
+    rosterB.map((n) => n.psychology.voice),
+    'same inputs reproduce byte-identical voice (accent + directives + phrases) for every NPC'
+  );
+  for (const npc of rosterA) {
+    assert.ok(Array.isArray(npc.psychology.voice.phrases), 'every generated NPC carries a (possibly empty) snapshotted phrases array');
+    const raceDef = races[npc.identity.race];
+    const accentDef = raceDef.voiceAccents.find((a) => a.name === npc.psychology.voice.accent);
+    assert.deepEqual(
+      npc.psychology.voice.phrases,
+      accentDef.signaturePhrases,
+      "snapshotted phrases equal the registry accent entry's signaturePhrases at generation time"
+    );
+  }
+  record('AP1 PASSED: accent + phrases are a permanent birth snapshot — pure, reproducible, and equal to the registry entry at generation time');
+
+  // AP2: prompt rendering — the extrapolate-don't-recite instruction and every
+  // phrase render when phrases are present; the line is silently omitted (no
+  // crash, no blank artifact) when phrases are absent, covering hand-authored
+  // entities that predate this field.
+  const npcWithPhrases = rosterA[0];
+  const relationship = { stats: { affection: 0, comfort: 0, trust: 0, desire: 0, obedience: 0 }, fromCallsTo: null };
+  const promptWith = buildDialoguePrompt(npcWithPhrases, relationship, [], 'Hello there.');
+  assert.ok(promptWith.includes('Favors words/phrases like:'), 'prompt must render the phrase-seed instruction when phrases are present');
+  for (const phrase of npcWithPhrases.psychology.voice.phrases) {
+    assert.ok(promptWith.includes(phrase), `prompt must include the seed phrase "${phrase}"`);
+  }
+  assert.ok(promptWith.includes('not limited to only this list'), 'prompt must instruct the model to extrapolate, not recite only the seed list');
+
+  const noPhraseNpc = {
+    ...npcWithPhrases,
+    psychology: {
+      ...npcWithPhrases.psychology,
+      voice: { accent: npcWithPhrases.psychology.voice.accent, directives: npcWithPhrases.psychology.voice.directives },
+    },
+  };
+  const promptWithout = buildDialoguePrompt(noPhraseNpc, relationship, [], 'Hello there.');
+  assert.ok(
+    !promptWithout.includes('Favors words/phrases like:'),
+    'prompt must omit the phrase line entirely when voice.phrases is absent (hand-authored-entity compatibility)'
+  );
+  assert.ok(promptWithout.includes(`Accent: ${noPhraseNpc.psychology.voice.accent}`), 'the Accent line itself still renders with no phrases present');
+  record('AP2 PASSED: phrase-seed instruction renders exactly when phrases are present, and degrades gracefully (no crash, no stray line) when absent');
+}
+
+const sectionAPLinesA = [];
+runSectionAP((m) => { sectionAPLinesA.push(m); console.log(m); });
+const sectionAPLinesB = [];
+runSectionAP((m) => sectionAPLinesB.push(m));
+assert.deepEqual(sectionAPLinesA, sectionAPLinesB, 'Section AP output must be byte-identical across two full runs');
+console.log(`AP-final PASSED: Section AP produced identical output across two full runs (${sectionAPLinesA.length} lines)`);
+
+console.log(
+  '\nSection AP PASSED: every declared accent carries a curated signature-phrase seed list; the list is captured once at NPC birth as a permanent, reproducible fact equal to the registry entry at that moment; and the prompt renders an extrapolate-dont-recite instruction when phrases are present while degrading gracefully when absent'
+);
 
 // =============================================================================
 // Section EM: emotion — a TRANSIENT per-turn read, derived fresh from recent

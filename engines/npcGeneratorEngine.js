@@ -123,7 +123,11 @@ const PERSONALITY_TRAITS = Object.freeze(['warm', 'guarded', 'curious', 'blunt',
 const HOBBIES = Object.freeze(['whittling', 'card games', 'dice', 'fishing', 'gossip', 'singing', 'gardening', 'collecting odd stones', 'mending', 'charcoal sketches']);
 const LIKES = Object.freeze(['a warm meal', 'fair trade', 'quiet mornings', 'a good story', 'strong drink', 'festival days', 'honest work', 'rainy evenings']);
 const DISLIKES = Object.freeze(['cheats', 'crowds', 'being lied to', 'cold winters', 'debt', 'pushy strangers', 'spoiled food', 'idle hands']);
-const BASE_VOICE_ACCENTS = Object.freeze(['plain regional burr', 'soft rural drawl', 'clipped trade-road cadence']);
+const BASE_VOICE_ACCENTS = Object.freeze([
+  { name: 'plain regional burr', signaturePhrases: ['reckon', 'well enough', 'fair to say', "s'pose so", 'mind now'] },
+  { name: 'soft rural drawl', signaturePhrases: ['now then', 'bless it', 'sure as anything', 'no bother', 'all the same'] },
+  { name: 'clipped trade-road cadence', signaturePhrases: ['done deal', 'move along', 'straight talk', 'no delay', 'settled then'] },
+]);
 // speechPattern / voice-tag pools are gone: voice directives now derive from
 // personality axes (entities/voice.js), not from independent flavor rolls.
 const INTIMATE_GENITAL_BY_GENDER = Object.freeze({ female: 'vulva', male: 'penis' });
@@ -282,10 +286,19 @@ export function deriveNpc(config, node, enabledRaces, i) {
   // and voice-tag draws that used to sit here shifts no other field's draw:
   // they were the LAST draws in deriveNpc, so every earlier field stays
   // byte-identical; only voice's shape changes.
+  //
+  // The accent's signaturePhrases are NOT a second rng draw — voiceAccents
+  // entries are authored content ({ name, signaturePhrases }), so once `pick`
+  // lands on one entry its phrase list is a direct, deterministic lookup on
+  // that same draw. It is snapshotted onto the NPC here (birth fact) and
+  // never re-looked-up from the race registry at prompt-build time, so
+  // editing a race's accent phrases later cannot change already-generated NPCs.
   const hobbies = pickTwo(rng, HOBBIES);
   const likes = pickTwo(rng, LIKES);
   const dislikes = pickTwo(rng, DISLIKES);
-  const accent = pick(rng, race.voiceAccents ?? BASE_VOICE_ACCENTS);
+  const accentEntry = pick(rng, race.voiceAccents ?? BASE_VOICE_ACCENTS);
+  const accent = accentEntry.name;
+  const accentPhrases = accentEntry.signaturePhrases ?? [];
   const voiceDirectives = deriveVoiceDirectives(personalityAxes);
 
   const place = kind === 'settlement' ? node.classification.settlementId : 'the wilds';
@@ -316,7 +329,7 @@ export function deriveNpc(config, node, enabledRaces, i) {
       hobbies,
       likes,
       dislikes,
-      voice: { accent, directives: voiceDirectives },
+      voice: { accent, directives: voiceDirectives, phrases: accentPhrases },
       memories: [],
       flags: { personality: [], condition: [], aiDirectives: [] },
     },

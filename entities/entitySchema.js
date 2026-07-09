@@ -75,11 +75,14 @@
  * @property {string[]} hobbies
  * @property {string[]} likes
  * @property {string[]} dislikes
- * @property {{accent: string, directives: string[]}} voice - `accent` is a
- *   permanent cultural/racial flavor trait; `directives` are a small set of
+ * @property {{accent: string, directives: string[], phrases?: string[]}} voice
+ *   - `accent` is a permanent cultural/racial flavor trait; `phrases` is that
+ *   accent's small curated signature-word seed list, snapshotted from the
+ *   race registry at the same moment `accent` is rolled (absent on entities
+ *   authored before this field existed); `directives` are a small set of
  *   concrete, imperative, axis-derived speech rules (entities/voice.js),
  *   generated ONCE at creation and rendered at flag-level prompt prominence.
- *   Both are permanent — never recomputed, never touched by per-turn emotion.
+ *   All three are permanent — never recomputed, never touched by per-turn emotion.
  * @property {MemoryRef[]} memories
  * @property {{personality: string[], condition: string[], aiDirectives: string[]}} flags
  */
