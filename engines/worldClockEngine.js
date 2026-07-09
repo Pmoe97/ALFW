@@ -147,10 +147,14 @@ export function createWorldClockEngine(world) {
     throw new Error('WorldConfig is missing calendar');
   }
 
-  // Incrementally-maintained running total. It is only ever a cache: every
-  // value it holds is fully rebuildable from the log via deriveTotalGameSeconds
-  // (see rebuildTotalGameSeconds), which is what proves nothing is baked in.
-  let cachedTotalGameSeconds = 0;
+  // Incrementally-maintained running total, PRIMED from whatever CLOCK_*
+  // history the log already holds (0 on a fresh world) so the engine
+  // cold-starts correctly against a loaded save. It is only ever a cache:
+  // every value it holds is fully rebuildable from the log via
+  // deriveTotalGameSeconds (see rebuildTotalGameSeconds), which is exactly the
+  // function priming reuses — construction-time priming and the rebuild proof
+  // are the same computation by definition.
+  let cachedTotalGameSeconds = deriveTotalGameSeconds(config, world.getEventLog());
 
   world.subscribe('CLOCK_TICK', (entry) => {
     // The full entry is already in the log by the time this handler runs, so

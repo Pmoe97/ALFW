@@ -3,15 +3,26 @@
 // by edges along 8 compass headings, with coherent terrain, materialized lazily
 // as the player explores.
 //
-// WHY THIS ENGINE DOES NOT DISPATCH/SUBSCRIBE (unlike WorldClockEngine or the
-// relationship store): terrain is a PURE FUNCTION of (seed, coordinates), not a
-// history of dispatched events. There is nothing to replay. So the shape here
-// mirrors deriveCalendarDate (config-in / value-out, stateless math), NOT
-// deriveRelationshipStats (log-replay backed by a subscribe-maintained cache).
-// The materialization cache below is a performance optimization over the pure
-// derivation — never a second source of truth. Clearing it and regenerating at
-// the same coordinates yields identical results (see rebuildNodeAt), the same
+// WHAT IS PURE vs WHAT IS HISTORY: terrain and classification are PURE
+// FUNCTIONS of (seed, coordinates), not a history of dispatched events —
+// there is nothing to replay for them, so those derivations mirror
+// deriveCalendarDate (config-in / value-out, stateless math), NOT
+// deriveRelationshipStats. The node/classification caches below are
+// performance optimizations over the pure derivation — never a second source
+// of truth. Clearing them and regenerating at the same coordinates yields
+// identical results (see rebuildNodeAt / rebuildClassificationAt), the same
 // standing as rebuildRelationshipStats / rebuildTotalGameSeconds.
+//
+// THE ONE PIECE OF HISTORY: the EXPLORED GRAPH. Which nodes have had their
+// neighbors materialized — and therefore which edges exist — depends on the
+// ORDER exploration happened in (edge wiring reconciles each candidate against
+// whatever was already materialized; see materializeNeighbors). Order is
+// player history, and player history lives in the log: each first-time
+// materialization is committed as a MAP_NEIGHBORS_MATERIALIZED event, and
+// construction primes by replaying those events in log order — which provably
+// reproduces the identical graph, because the fold's only mutable input is the
+// node cache itself, evolving identically from the same deterministic origin.
+// That is what lets the explored world survive save/load.
 //
 // THE LOAD-BEARING GUARANTEE: determinism by POSITION, not by exploration order.
 // deriveTerrainAt(config, x, y) depends only on (seed, x, y), so which neighbor
@@ -626,10 +637,17 @@ function findPassableOrigin(config) {
   return { x: 0, y: 0 };
 }
 
+// The one event this engine owns: a node's first neighbor-materialization,
+// i.e. the player's exploration history (see the header note on the explored
+// graph). Terrain/classification stay pure and unlogged.
+const MAP_NEIGHBORS_MATERIALIZED = 'MAP_NEIGHBORS_MATERIALIZED';
+
 // createWorldMapEngine — the stateful engine. Same factory contract as the
-// other engines (createXxxEngine(world)) for consistency, even though it never
-// touches the action log. Holds only a provably-redundant materialization cache
-// and seeds a deterministic, guaranteed-passable origin node near (0, 0).
+// other engines (createXxxEngine(world)). Terrain and classification never
+// touch the action log (pure position functions); the explored graph does —
+// MAP_NEIGHBORS_MATERIALIZED entries are its history, primed at construction
+// and appended as the player explores. Also seeds a deterministic,
+// guaranteed-passable origin node near (0, 0).
 export function createWorldMapEngine(world) {
   const { config } = world.getState();
   readClassification(config); // validate terrain + classification up front
@@ -685,13 +703,14 @@ export function createWorldMapEngine(world) {
     node.edges.push({ to: toNode.id, heading, passable: toNode.passable });
   }
 
-  // materializeNeighbors — the stateful operation. Generates the 8 candidates,
-  // reconciles each against the cache within the tolerance radius, derives
-  // terrain for genuinely new candidates, stores them, and wires bidirectional
-  // edges. The forward edge carries the ATTEMPTED compass direction; the reverse
-  // edge's heading is computed from the REAL relative coordinates (not assumed
-  // opposite). Idempotent: re-materializing a node returns its existing set.
-  function materializeNeighbors(fromNodeId) {
+  // reconcileNeighbors — the stateful body shared by live materialization and
+  // log replay. Generates the 8 candidates, reconciles each against the cache
+  // within the tolerance radius, derives terrain for genuinely new candidates,
+  // stores them, and wires bidirectional edges. The forward edge carries the
+  // ATTEMPTED compass direction; the reverse edge's heading is computed from
+  // the REAL relative coordinates (not assumed opposite). Idempotent:
+  // re-running it for a node returns its existing set.
+  function reconcileNeighbors(fromNodeId) {
     const fromNode = nodes.get(fromNodeId);
     if (!fromNode) throw new Error(`WorldMapEngine: unknown node "${fromNodeId}"`);
 
@@ -728,6 +747,37 @@ export function createWorldMapEngine(world) {
 
     materialized.add(fromNode.id);
     return { origin: fromNode, neighbors, edges, created, reconciled };
+  }
+
+  // applyNeighborsMaterialized — fold ONE committed materialization into the
+  // graph: at construction for entries already in the log (cold-start priming
+  // against a loaded save), then live via the subscription. The result is
+  // stashed so the dispatching materializeNeighbors call can return it.
+  let lastReconcileResult = null;
+  function applyNeighborsMaterialized(entry) {
+    lastReconcileResult = reconcileNeighbors(entry.payload.nodeId);
+  }
+
+  // Prime the explored graph from existing history — replaying committed
+  // materializations in log order from the same deterministic origin rebuilds
+  // the identical node set and edges (a no-op on a fresh world) — then
+  // subscribe for live exploration.
+  for (const entry of world.getEventLog()) {
+    if (entry.type === MAP_NEIGHBORS_MATERIALIZED) applyNeighborsMaterialized(entry);
+  }
+  world.subscribe(MAP_NEIGHBORS_MATERIALIZED, applyNeighborsMaterialized);
+
+  // materializeNeighbors — the public exploration verb. A node's FIRST
+  // materialization is player history, so it is committed to the log (the
+  // subscribe handler does the actual graph work); re-materializing an
+  // already-explored node changes nothing, so it re-runs the idempotent body
+  // directly for the same return shape without logging a second event — the
+  // log carries at most one MAP_NEIGHBORS_MATERIALIZED per node.
+  function materializeNeighbors(fromNodeId) {
+    if (!nodes.has(fromNodeId)) throw new Error(`WorldMapEngine: unknown node "${fromNodeId}"`);
+    if (materialized.has(fromNodeId)) return reconcileNeighbors(fromNodeId);
+    world.dispatch(MAP_NEIGHBORS_MATERIALIZED, { nodeId: fromNodeId });
+    return lastReconcileResult;
   }
 
   function getNode(nodeId) {

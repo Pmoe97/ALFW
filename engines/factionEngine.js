@@ -46,13 +46,22 @@ export function createFactionEngine(world) {
   // rebuildable from the log via deriveFactionControl.
   const cachedOverrides = new Map();
 
-  // ORDER MATTERS, exactly as with the relationship store: this subscription
-  // must be registered before any FACTION_CONTROL_CHANGED is dispatched (seeds
-  // included) or the cache would miss those early events and silently go stale.
-  world.subscribe(FACTION_CONTROL_CHANGED, (entry) => {
+  // applyControlChanged — the ONE code path that folds a FACTION_CONTROL_CHANGED
+  // into the cache: at construction for entries already in the log (cold-start
+  // priming against a loaded save), then live via the subscription.
+  function applyControlChanged(entry) {
     const { settlementId, factionId } = entry.payload;
     cachedOverrides.set(settlementId, factionId ?? null);
-  });
+  }
+
+  // Prime from existing history (no-op on a fresh world), then subscribe.
+  // ORDER MATTERS for the subscription exactly as with the relationship store:
+  // it must be live before any NEW FACTION_CONTROL_CHANGED is dispatched or
+  // the cache would miss those events and silently go stale.
+  for (const entry of world.getEventLog()) {
+    if (entry.type === FACTION_CONTROL_CHANGED) applyControlChanged(entry);
+  }
+  world.subscribe(FACTION_CONTROL_CHANGED, applyControlChanged);
 
   // setFactionControl — the single sanctioned way to change control. It only
   // dispatches; the subscribe handler above updates the cache. This keeps control

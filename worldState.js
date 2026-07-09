@@ -36,7 +36,7 @@ function deepFreeze(value) {
 
 const REQUIRED_CONFIG_FIELDS = ['worldName', 'startDateTime', 'rngSeed'];
 
-export function createWorldState(config) {
+export function createWorldState(config, savedLog = []) {
   for (const field of REQUIRED_CONFIG_FIELDS) {
     if (config?.[field] === undefined) {
       throw new Error(`WorldConfig is missing required field "${field}"`);
@@ -58,6 +58,25 @@ export function createWorldState(config) {
   // deterministic.
   const eventLog = [];
   const worldTime = new Date(config.startDateTime).toISOString();
+
+  // Optional pre-populated history (the load half of save/load). Entries are
+  // installed verbatim — validated, cloned, re-frozen — with NO subscriber
+  // notification: nothing has subscribed yet at construction time, and engines
+  // built afterwards prime their caches from getEventLog() instead of being
+  // replayed into. Because dispatch derives seq from eventLog.length, new
+  // events simply continue the saved history.
+  if (!Array.isArray(savedLog)) {
+    throw new Error('createWorldState: savedLog must be an array of log entries');
+  }
+  savedLog.forEach((entry, i) => {
+    if (entry?.seq !== i) {
+      throw new Error(`createWorldState: savedLog entry ${i} has seq ${entry?.seq} — the log must be contiguous from 0`);
+    }
+    if (typeof entry.type !== 'string' || !('payload' in entry)) {
+      throw new Error(`createWorldState: savedLog entry ${i} is missing a string type or a payload`);
+    }
+    eventLog.push(deepFreeze(structuredClone(entry)));
+  });
 
   // actionType -> array of handlers, notified in subscription order.
   const subscribers = new Map();

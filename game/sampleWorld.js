@@ -275,8 +275,18 @@ const WORLD_CONFIG = {
   },
 };
 
-export function buildSampleWorld() {
-  const world = createWorldState(WORLD_CONFIG);
+// buildSampleWorld — the canonical construction path, for BOTH a fresh world
+// and a loaded save (pass { save } as returned by saveLoad.parseSave). The
+// split of responsibilities on load:
+//   - the SAVE supplies raw state: config + the event log, verbatim;
+//   - CONSTRUCTION re-runs the static baseline exactly as on a fresh build —
+//     hand-authored entities, registration, direct-set labels — because that
+//     authoring is shipped-game data, like config, not logged history;
+//   - each engine primes its cache from the log it finds at construction;
+//   - the seed DISPATCHES are skipped — those events are already in the saved
+//     log, and re-dispatching them would double history.
+export function buildSampleWorld({ save } = {}) {
+  const world = createWorldState(save?.config ?? WORLD_CONFIG, save?.eventLog ?? []);
 
   // The live race registry (settings surface). Constructed first — before any
   // dispatches — because its RACE_* subscriptions must not miss an edit event
@@ -502,11 +512,15 @@ export function buildSampleWorld() {
   // that dispatches relationship events) or the cache would miss these events.
   const relationships = createRelationshipStore(world);
 
-  // Seed the starting edges. Stats are now log-derived, so the starting
-  // values are dispatched as RELATIONSHIP_EVENTs (one per non-zero axis); the
-  // asymmetric fromCallsTo label is direct-set.
+  // Seed the starting edges. Stats are log-derived, so the starting values are
+  // dispatched as RELATIONSHIP_EVENTs (one per non-zero axis) — but ONLY on a
+  // fresh world: a loaded save already carries those events in its log (the
+  // relationship store just primed from them), and re-dispatching would double
+  // every seed stat. The asymmetric fromCallsTo label is direct-set and NOT in
+  // the log, so it is (re-)applied unconditionally, save or no save.
   function seedEdge(fromId, toId, stats, label) {
     relationships.setLabel(fromId, toId, label);
+    if (save) return;
     for (const [axis, delta] of Object.entries(stats)) {
       if (delta !== 0) relationships.recordRelationshipEvent(fromId, toId, axis, delta);
     }
