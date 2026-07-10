@@ -118,6 +118,29 @@ const WORLD_CONFIG = {
       },
     },
   },
+  // Travel pacing + incident tables (engines/travelEngine.js). A typical leg
+  // (baseInterNodeDistance 10 ± jitter → distance ~7–13) costs ~21–39 game-
+  // minutes, which at the traveling ×60 dilation with 1s ticks is ~21–39 REAL
+  // seconds — long enough to hide the 15s AI-narration timeout behind the
+  // visibly advancing clock. turnIntensityByCategory is the intensity at which
+  // an incident becomes a requires-a-real-turn branch (4 = never, since
+  // intensity tops out at 3 — mundane events are always auto flavor).
+  travel: {
+    gameSecondsPerDistanceUnit: 180,
+    exploreDurationGameSeconds: 600,
+    incident: {
+      incidentChance: 0.5,
+      categories: {
+        animal: { weight: 3 },
+        bandit: { weight: 2 },
+        npc: { weight: 3 },
+        environmental: { weight: 3 },
+        mundane: { weight: 4 },
+      },
+      intensityWeights: { 1: 5, 2: 3, 3: 1 },
+      turnIntensityByCategory: { animal: 3, bandit: 2, npc: 3, environmental: 3, mundane: 4 },
+    },
+  },
   // Top-level SIBLING of worldMap on purpose: worldMap.* is seed-locked
   // generation config; raceRegistry is the DEFAULTS of a live, player-editable
   // settings surface (see entities/raceRegistry.js).

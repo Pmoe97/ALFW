@@ -18,9 +18,12 @@
 import { buildSampleWorld } from './sampleWorld.js';
 import { createRelationshipEffectEngine } from '../engines/relationshipEffectEngine.js';
 import { createMemoryEngine } from '../engines/memoryEngine.js';
+import { createWorldMapEngine } from '../engines/worldMapEngine.js';
+import { createPoiEngine } from '../engines/poiEngine.js';
 import { createWorldClockEngine } from '../engines/worldClockEngine.js';
+import { createTravelEngine } from '../engines/travelEngine.js';
 import { createTickSource } from './tickSource.js';
-import { helpNpc, robNpc, ignoreNpc } from '../actions/playerActions.js';
+import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from '../actions/playerActions.js';
 import { relationshipTier } from '../entities/relationshipStore.js';
 import { getRecentHistory } from '../entities/conversationHistoryStore.js';
 import { getDialogue } from '../ai/getDialogue.js';
@@ -41,12 +44,21 @@ const presence = {
 };
 createMemoryEngine(world, registry, presence);
 
-// World clock: created BEFORE the tick source starts so it catches every
-// CLOCK_TICK. It owns all game-time derivation; the tick source below only
-// dispatches ticks on an interval.
+// Map + POI + clock + travel, in the canonical engine order (map → poi →
+// … → clock → travel) and all created BEFORE the tick source starts so the
+// clock and travel engines catch every CLOCK_TICK. The clock owns game-time
+// derivation; the travel engine owns the player's position and the timed
+// travel/explore activities; the tick source below only dispatches ticks.
+const map = createWorldMapEngine(world);
+const poi = createPoiEngine(world);
 const clock = createWorldClockEngine(world);
+const travel = createTravelEngine(world, map, poi);
 const config = world.getState().config;
 const tick = createTickSource(world, config);
+
+// Materialize the starting node's neighbors so there are edges to travel
+// along (logged once; a no-op re-run if the log already carries it).
+map.materializeNeighbors(travel.getPlayerNodeId());
 
 const relationshipEl = document.getElementById('relationship');
 const relationshipTiersEl = document.getElementById('relationship-tiers');
@@ -54,6 +66,12 @@ const memoriesEl = document.getElementById('memories');
 const dialogueOutputEl = document.getElementById('dialogue-output');
 const playerInputEl = document.getElementById('player-input');
 const clockEl = document.getElementById('clock');
+const locationEl = document.getElementById('location');
+const travelStatusEl = document.getElementById('travel-status');
+const travelButtonsEl = document.getElementById('travel-buttons');
+const poiListEl = document.getElementById('poi-list');
+const exploreBtn = document.getElementById('btn-explore');
+const talkBtn = document.getElementById('btn-talk');
 
 // Read-only tier readout for the entities currently in the scene. Pure
 // surfacing of what getRelationship()/relationshipTier() already compute —
@@ -112,25 +130,100 @@ function renderClock() {
 }
 world.subscribe('CLOCK_TICK', renderClock);
 
-// Debug-only context switch. Real gameplay verbs (travel, dialogue) don't
-// exist yet, so this dispatches a bare, clearly-debug action carrying ONLY a
-// timeContext — enough to prove the tick source + dilation live without
-// pretending those verbs exist. WorldClockEngine already reads any action's
-// optional timeContext, so no engine change is needed.
-function debugSetContext(name) {
-  world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: name });
-  renderClock();
-}
-window.debugSetContext = debugSetContext; // also console-callable
-
 // Console channels: toggleable independent of engine behavior (debugLog.js).
 // Silencing a channel never stops what it silences — WorldClockEngine keeps
 // ticking into the log at the same rate whether its channel is on or off.
 window.setLogChannel = setChannelEnabled; // e.g. setLogChannel('WorldClockEngine', true)
 console.log("[DebugLog] Console channels are toggleable: setLogChannel('WorldClockEngine', true) to re-enable tick/jump logs (off by default — very high frequency).");
-document.getElementById('btn-ctx-idle').addEventListener('click', () => debugSetContext('idle'));
-document.getElementById('btn-ctx-traveling').addEventListener('click', () => debugSetContext('traveling'));
-document.getElementById('btn-ctx-chatting').addEventListener('click', () => debugSetContext('chatting'));
+
+// --- Travel & explore: the real player verbs -----------------------------
+// The debug context switch that used to live here is retired: travel and
+// explore now carry their timeContexts on real dispatched actions, and Talk
+// below brackets its AI call with 'chatting'/'idle'.
+//
+// While an activity is open (a travel leg, an explore window) or a Talk call
+// is in flight, the other verb buttons are disabled: the clock's context
+// derivation is last-write-wins, so overlapping activities would stomp each
+// other's context (dialogue-during-travel stays deferred).
+let talkInFlight = false;
+
+function describePlace(node) {
+  const c = node.classification;
+  return c?.kind === 'settlement' ? `${c.tier} (${node.terrainType})` : `${node.terrainType} wilderness`;
+}
+
+function renderTravel() {
+  const node = map.getNode(travel.getPlayerNodeId());
+  const activity = travel.getActiveActivity();
+  const busy = activity !== null || talkInFlight;
+
+  locationEl.textContent = `${describePlace(node)} — ${node.id}`;
+
+  // Status: the in-transit leg with live % progress (the dilated clock IS the
+  // loading indicator — the incident narration lands under it while the leg
+  // is still elapsing), the open explore window, or the last leg's narration.
+  if (activity?.kind === 'travel') {
+    const pct = Math.min(100, Math.floor((activity.elapsedGameSeconds / activity.durationGameSeconds) * 100));
+    const incident = travel.getIncident(activity.legIndex);
+    travelStatusEl.innerHTML =
+      `<p>Traveling ${activity.fromNodeId} → ${activity.toNodeId} — ${pct}%</p>` +
+      (incident ? `<p><em>${incident.narration}</em></p>` : '');
+  } else if (activity?.kind === 'explore') {
+    const pct = Math.min(100, Math.floor((activity.elapsedGameSeconds / activity.durationGameSeconds) * 100));
+    travelStatusEl.innerHTML = `<p>Exploring… — ${pct}%</p>`;
+  } else {
+    const incidents = travel.getIncidents();
+    const last = incidents[incidents.length - 1];
+    travelStatusEl.innerHTML = last ? `<p><em>${last.narration}</em></p>` : '';
+  }
+
+  // One button per edge of the current node — travel is only ever to an
+  // adjacent, passable node.
+  travelButtonsEl.innerHTML = '';
+  for (const edge of node.edges) {
+    const dest = map.getNode(edge.to);
+    const btn = document.createElement('button');
+    btn.textContent = `${edge.heading}: ${dest ? describePlace(dest) : '?'}${edge.passable ? '' : ' ⛔'}`;
+    btn.disabled = busy || !edge.passable;
+    btn.addEventListener('click', () => {
+      travel.startTravel(edge.to);
+      renderTravel();
+    });
+    travelButtonsEl.appendChild(btn);
+  }
+  exploreBtn.disabled = busy;
+  talkBtn.disabled = busy;
+
+  // POIs at this node: what's been found, how much is left, plus a directed
+  // "seek out" button for any undiscovered POI the player holds reveal
+  // authority for (granted by future quest/dialogue systems).
+  const { pool, discovered, undiscovered } = poi.getPoiState(node);
+  const revealed = poi.getRevealedPoiIds();
+  const found = pool
+    .filter((p) => discovered.has(p.id))
+    .map((p) => `<li>${p.category} (${p.id})</li>`)
+    .join('');
+  poiListEl.innerHTML =
+    `<ul>${found}</ul><p><small>${discovered.size} of ${pool.length} POIs discovered here.</small></p>`;
+  for (const p of undiscovered.filter((p) => revealed.has(p.id))) {
+    const btn = document.createElement('button');
+    btn.textContent = `Seek out ${p.id}`;
+    btn.disabled = busy;
+    btn.addEventListener('click', () => {
+      travel.startExploreDirected(p.id);
+      renderTravel();
+    });
+    poiListEl.appendChild(btn);
+  }
+}
+
+exploreBtn.addEventListener('click', () => {
+  travel.startExplore();
+  renderTravel();
+});
+
+// Progress/arrival/window-end all move on ticks, so re-render with the clock.
+world.subscribe('CLOCK_TICK', renderTravel);
 
 // Pause-on-blur (default, driven by config). When the tab is backgrounded the
 // tick source stops dispatching entirely, so game-time freezes instead of
@@ -161,20 +254,36 @@ document.getElementById('btn-ignore').addEventListener('click', () => {
   render();
 });
 
-document.getElementById('btn-talk').addEventListener('click', async () => {
-  const playerLine = playerInputEl.value;
-  const edge = relationships.getRelationship(mira.id, rowan.id);
-  const recentHistory = getRecentHistory(conversationHistory.getConversationHistory(mira.id, rowan.id));
-  const result = await getDialogue(mira, edge, mira.psychology.memories, playerLine, world.getEventLog(), recentHistory);
-  conversationHistory.recordDialogueLine(mira.id, rowan.id, rowan.id, playerLine);
-  conversationHistory.recordDialogueLine(mira.id, rowan.id, mira.id, result.response.dialogue);
-  log('TestHarness', 'dialogue result:', result);
-  dialogueOutputEl.textContent = JSON.stringify(
-    { source: result.source, dialogue: result.response.dialogue },
-    null,
-    2
-  );
-  render();
+// Talk — the real dialogue verb, now with its real time cost: the exchange is
+// bracketed by startDialogue/endDialogue so the whole AI-latency window
+// elapses at the 'chatting' multiplier, then the context returns to 'idle'.
+// endDialogue sits in a `finally` so a failed call can never strand the clock
+// on 'chatting'.
+talkBtn.addEventListener('click', async () => {
+  if (talkInFlight || travel.getActiveActivity()) return;
+  talkInFlight = true;
+  renderTravel();
+  startDialogue(world, rowan.id, mira.id);
+  try {
+    const playerLine = playerInputEl.value;
+    const edge = relationships.getRelationship(mira.id, rowan.id);
+    const recentHistory = getRecentHistory(conversationHistory.getConversationHistory(mira.id, rowan.id));
+    const result = await getDialogue(mira, edge, mira.psychology.memories, playerLine, world.getEventLog(), recentHistory);
+    conversationHistory.recordDialogueLine(mira.id, rowan.id, rowan.id, playerLine);
+    conversationHistory.recordDialogueLine(mira.id, rowan.id, mira.id, result.response.dialogue);
+    log('TestHarness', 'dialogue result:', result);
+    dialogueOutputEl.textContent = JSON.stringify(
+      { source: result.source, dialogue: result.response.dialogue },
+      null,
+      2
+    );
+    render();
+  } finally {
+    endDialogue(world, rowan.id, mira.id);
+    talkInFlight = false;
+    renderTravel();
+  }
 });
 
 render();
+renderTravel();

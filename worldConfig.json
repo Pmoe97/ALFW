@@ -130,6 +130,22 @@
       }
     }
   },
+  "travel": {
+    "gameSecondsPerDistanceUnit": 180,
+    "exploreDurationGameSeconds": 600,
+    "incident": {
+      "incidentChance": 0.5,
+      "categories": {
+        "animal": { "weight": 3 },
+        "bandit": { "weight": 2 },
+        "npc": { "weight": 3 },
+        "environmental": { "weight": 3 },
+        "mundane": { "weight": 4 }
+      },
+      "intensityWeights": { "1": 5, "2": 3, "3": 1 },
+      "turnIntensityByCategory": { "animal": 3, "bandit": 2, "npc": 3, "environmental": 3, "mundane": 4 }
+    }
+  },
   "raceRegistry": {
     "races": {
       "human": {

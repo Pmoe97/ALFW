@@ -35,7 +35,9 @@ import { buildSampleWorld } from './game/sampleWorld.js';
 import { serializeWorld, parseSave, diffConfigKeys } from './game/saveLoad.js';
 import { createRelationshipEffectEngine } from './engines/relationshipEffectEngine.js';
 import { createMemoryEngine, deriveEntityMemories } from './engines/memoryEngine.js';
-import { helpNpc, robNpc, ignoreNpc } from './actions/playerActions.js';
+import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from './actions/playerActions.js';
+import { createTravelEngine, deriveTravelIncident } from './engines/travelEngine.js';
+import { fallbackTravelNarration } from './ai/fallbackTravelNarration.js';
 import {
   createWorldClockEngine,
   deriveCalendarDate,
@@ -954,9 +956,10 @@ console.log(`\nSection H PASSED: Sable Voss seeded with pre-existing, asymmetric
 // play. WorldClockEngine (Section F) is proven; this proves the runtime piece
 // that feeds it. createTickSource dispatches CLOCK_TICK on a real interval in
 // the browser, but exposes simulateTicks(n) so the exact same dispatch path can
-// be driven deterministically here with no timer. The debug context switch
-// (DEBUG_SET_TIME_CONTEXT, a bare timeContext-carrying action) is what the test
-// harness uses to prove dilation live; it is exercised here too.
+// be driven deterministically here with no timer. Context switches are driven
+// by dispatching the REAL verbs' action types bare (only their timeContext
+// payload matters to the clock; no travel/dialogue engine is wired here) —
+// the debug context switch that used to stand in for them is retired.
 //
 // NOT auto-tested: pause-on-blur. Pausing stops a real setInterval on a real
 // tab-visibility event — inherently timer/visibility driven, not reproducible
@@ -985,25 +988,26 @@ assert.deepEqual(
 );
 console.log(`I1 PASSED: 5 idle ticks → ${runtime.clock.getTotalGameSeconds()} game-s, ${JSON.stringify(runtime.clock.getCurrentDate())}`);
 
-// --- I2: the debug context switch drives dilation mid-stream -----------------
-// A bare DEBUG_SET_TIME_CONTEXT action (only a timeContext, no gameplay verb)
-// flips the active multiplier, exactly as the harness buttons do.
+// --- I2: real verb actions drive dilation mid-stream -------------------------
+// The clock keys off any action's timeContext payload, so the real verbs'
+// action types (dispatched bare — no travel/dialogue engine wired here) flip
+// the active multiplier exactly as the full verbs do in the harness.
 const iBeforeTravel = runtime.clock.getTotalGameSeconds();
-runtime.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'traveling' });
-assert.equal(runtime.clock.getActiveTimeContext(), 'traveling', 'the debug switch must set the active context');
+runtime.world.dispatch('ACTION_TRAVEL_STARTED', { timeContext: 'traveling' });
+assert.equal(runtime.clock.getActiveTimeContext(), 'traveling', 'a travel start must set the active context');
 runtime.tick.simulateTicks(5); // 5 real-s × 60
 assert.equal(runtime.clock.getTotalGameSeconds() - iBeforeTravel, 5 * 60, 'traveling ticks must use × 60');
 
 const iBeforeChat = runtime.clock.getTotalGameSeconds();
-runtime.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'chatting' });
+runtime.world.dispatch('ACTION_DIALOGUE_STARTED', { timeContext: 'chatting' });
 runtime.tick.simulateTicks(5); // 5 real-s × 1
 assert.equal(runtime.clock.getTotalGameSeconds() - iBeforeChat, 5 * 1, 'chatting ticks must use × 1');
 
 const iBeforeIdleAgain = runtime.clock.getTotalGameSeconds();
-runtime.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'idle' });
+runtime.world.dispatch('ACTION_DIALOGUE_ENDED', { timeContext: 'idle' });
 runtime.tick.simulateTicks(5); // 5 real-s × 20
-assert.equal(runtime.clock.getTotalGameSeconds() - iBeforeIdleAgain, 5 * 20, 'switching back to idle must restore × 20');
-console.log('I2 PASSED: debug context switch drove × 60 (traveling), × 1 (chatting), × 20 (idle) mid-stream');
+assert.equal(runtime.clock.getTotalGameSeconds() - iBeforeIdleAgain, 5 * 20, 'ending the dialogue must restore × 20');
+console.log('I2 PASSED: real verb actions drove × 60 (traveling), × 1 (chatting), × 20 (idle) mid-stream');
 
 // --- I3: the cache still equals a from-scratch rebuild after tick-driving -----
 assert.equal(
@@ -1018,9 +1022,9 @@ const runtimeA = buildTickWorld();
 const runtimeB = buildTickWorld();
 function driveRuntime({ world: w, tick: t }) {
   t.simulateTicks(3);
-  w.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'traveling' });
+  w.dispatch('ACTION_TRAVEL_STARTED', { timeContext: 'traveling' });
   t.simulateTicks(4);
-  w.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'idle' });
+  w.dispatch('TRAVEL_ARRIVED', { timeContext: 'idle' });
   t.simulateTicks(2);
 }
 driveRuntime(runtimeA);
@@ -1068,13 +1072,13 @@ console.log("J1 PASSED: 'WorldClockEngine' channel defaults to disabled");
 // identical total. If it didn't, logging would no longer be a pure side effect.
 const silentWorld = buildTickWorld();
 silentWorld.tick.simulateTicks(5);
-silentWorld.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'traveling' });
+silentWorld.world.dispatch('ACTION_TRAVEL_STARTED', { timeContext: 'traveling' });
 silentWorld.tick.simulateTicks(3);
 
 setChannelEnabled('WorldClockEngine', true);
 const loudWorld = buildTickWorld();
 loudWorld.tick.simulateTicks(5);
-loudWorld.world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'traveling' });
+loudWorld.world.dispatch('ACTION_TRAVEL_STARTED', { timeContext: 'traveling' });
 loudWorld.tick.simulateTicks(3);
 setChannelEnabled('WorldClockEngine', false); // restore the shipped default
 
@@ -2657,6 +2661,231 @@ console.log('CH6 PASSED: buildDialoguePrompt renders the conversation-history se
 console.log('\nSection CH PASSED: dialogue history is pair-keyed (order-independent), thread-isolated per partner, deterministic, bounded-window correct, rebuildable, and wired into the dialogue prompt');
 
 // =============================================================================
+// Section TR: travel engine — the real travel/explore verbs and the seeded
+// incident system.
+//
+// Proves the two-phase discipline end to end: (1) the incident roll is a PURE
+// seeded function committed to the log the instant travel starts — same seed +
+// same leg ⇒ same incident, every time — and (2) AI narration only ever colors
+// those committed facts afterward (and under Node's no-AI environment the
+// deterministic "safe travels" fallback simply stays). Also: exactly one
+// incident per leg, tick-driven arrival on the exact expected tick, the
+// requires-a-real-turn auto-passthrough (facts logged for a future
+// combat/social system, travel never hangs), edge-only destinations, the
+// explore window, dialogue's chatting brackets, and every cache's rebuild
+// redundancy.
+// =============================================================================
+console.log('\n=== Section TR: travel — real verbs, seeded incidents, tick-driven arrival ===');
+
+// The map/poi/clock/travel stack in the canonical wiring order, tick source
+// last, starting node materialized so edges exist to travel along. An
+// optional config override lets TR5 retune incident tables.
+function buildTravelWorld(configOverride) {
+  const w = configOverride ? createWorldState(configOverride) : initWorldState(CONFIG_PATH);
+  const map = createWorldMapEngine(w);
+  const poi = createPoiEngine(w);
+  const clock = createWorldClockEngine(w);
+  const travel = createTravelEngine(w, map, poi);
+  const tick = createTickSource(w, w.getState().config);
+  map.materializeNeighbors(map.getOriginNode().id);
+  return { world: w, map, poi, clock, travel, tick };
+}
+
+// First passable edge out of the player's current node — travel is only ever
+// to an adjacent node, so this is how a destination is legitimately chosen.
+function trNextDest(t) {
+  const node = t.map.getNode(t.travel.getPlayerNodeId());
+  const edge = node.edges.find((e) => e.passable);
+  assert.ok(edge, `TR needs a passable edge out of ${node.id}`);
+  return edge.to;
+}
+
+// Drive ticks until the open activity completes; returns the tick count.
+// The bound is itself part of the proof: travel must NEVER hang.
+function trTickToCompletion(t, maxTicks = 200) {
+  let n = 0;
+  while (t.travel.getActiveActivity()) {
+    if (++n > maxTicks) throw new Error('TR: activity never completed — travel must never hang');
+    t.tick.simulateTicks(1);
+  }
+  return n;
+}
+
+// --- TR1: the incident roll is deterministic — same seed + same leg ⇒ same
+// incident, both at the pure-function level and across two whole worlds.
+const trA = buildTravelWorld();
+const trB = buildTravelWorld();
+const trOriginNode = trA.map.getNode(trA.travel.getPlayerNodeId());
+assert.deepEqual(
+  deriveTravelIncident(trA.world.getState().config, trOriginNode, 0),
+  deriveTravelIncident(trA.world.getState().config, trOriginNode, 0),
+  'the incident roll is a pure function — two calls must be identical'
+);
+const trDest0 = trNextDest(trA);
+assert.equal(trNextDest(trB), trDest0, 'identically-seeded worlds must offer the identical first destination');
+trA.travel.startTravel(trDest0);
+trB.travel.startTravel(trDest0);
+assert.deepEqual(trB.travel.getIncident(0), trA.travel.getIncident(0), 'same seed + same leg ⇒ the same committed incident, every time');
+console.log(`TR1 PASSED: incident roll deterministic — leg 0 rolled '${trA.travel.getIncident(0).category}' in both worlds`);
+
+// --- TR2: two-phase order — the roll (with fallback narration) is committed
+// SYNCHRONOUSLY at travel start; the AI line lands later as its own event and
+// replaces ONLY the display text, never the rolled facts.
+const TR_AI_LINE = 'The AI colors the fixed facts of the road, changing nothing.';
+globalThis.generateText = () => Promise.resolve(TR_AI_LINE);
+const trAi = buildTravelWorld();
+const trAiStart = trAi.travel.startTravel(trNextDest(trAi));
+const trAiLog = trAi.world.getEventLog();
+assert.equal(trAiLog[trAiStart.seq].type, 'ACTION_TRAVEL_STARTED');
+assert.equal(trAiLog[trAiStart.seq + 1].type, 'TRAVEL_INCIDENT', 'phase 1: the seeded roll must be committed synchronously, in the very next log entry');
+const trRolled = trAi.travel.getIncident(0);
+assert.ok(typeof trRolled.narration === 'string' && trRolled.narration.length > 0, 'the fallback narration must be present the instant the incident is committed');
+assert.ok(!trAiLog.some((e) => e.type === 'TRAVEL_NARRATION_ENHANCED'), 'phase 2 (AI) must not land synchronously — narration only ever follows the committed roll');
+for (let i = 0; trAi.travel.getIncident(0).narration !== TR_AI_LINE; i++) {
+  if (i > 2000) throw new Error('TR2: the AI narration never landed');
+  await new Promise((r) => setTimeout(r, 5));
+}
+delete globalThis.generateText;
+const trEnhanced = trAi.travel.getIncident(0);
+assert.deepEqual(
+  { ...trEnhanced, narration: trRolled.narration },
+  trRolled,
+  'enhancement must replace ONLY the narration — every rolled fact stays exactly as committed'
+);
+trTickToCompletion(trAi);
+console.log('TR2 PASSED: roll committed first, AI enhancement landed later and touched only the display text');
+
+// --- TR3: the safe-travels fallback — under Node (no generateText), the
+// committed narration IS the deterministic fallback line, no enhancement
+// event ever appears, and the leg completes without waiting on anything.
+assert.equal(typeof generateText, 'undefined', 'TR3 must run in the no-AI Node environment');
+const trLeg0 = trA.travel.getIncident(0);
+assert.equal(trLeg0.narration, fallbackTravelNarration(trLeg0), 'with no plugin, the committed narration is the deterministic fallback line');
+trTickToCompletion(trA);
+assert.ok(!trA.world.getEventLog().some((e) => e.type === 'TRAVEL_NARRATION_ENHANCED'), 'no AI ⇒ no enhancement event, and nothing hangs waiting for one');
+console.log(`TR3 PASSED: safe-travels fallback held — "${trLeg0.narration}"`);
+
+// --- TR4: max one incident per leg — quiet legs included: every started leg
+// commits exactly one TRAVEL_INCIDENT, never zero, never stacked.
+trA.travel.startTravel(trNextDest(trA));
+trTickToCompletion(trA);
+trA.travel.startTravel(trNextDest(trA));
+trTickToCompletion(trA);
+const trStarts = trA.world.getEventLog().filter((e) => e.type === 'ACTION_TRAVEL_STARTED');
+const trIncidents = trA.world.getEventLog().filter((e) => e.type === 'TRAVEL_INCIDENT');
+assert.equal(trStarts.length, 3, 'the journey so far is three legs');
+assert.equal(trIncidents.length, trStarts.length, 'exactly one incident record per started leg');
+for (let leg = 0; leg < trStarts.length; leg++) {
+  assert.equal(trIncidents.filter((e) => e.payload.legIndex === leg).length, 1, `leg ${leg} must carry exactly one incident`);
+}
+console.log(`TR4 PASSED: ${trStarts.length} legs, exactly one TRAVEL_INCIDENT each (quiet legs logged as category:'none')`);
+
+// --- TR5: the requires-a-real-turn branch — under a config retuned so every
+// leg rolls a 'turn' incident, the stakes are committed as real facts (the
+// future combat/social system's hook) but the incident resolves as a narrated
+// auto-passthrough, clearly distinct from a quiet leg, and travel still
+// arrives on schedule instead of hard-blocking on a system that doesn't exist.
+const trTurnConfig = structuredClone(trA.world.getState().config);
+trTurnConfig.travel.incident.incidentChance = 1;
+for (const cat of Object.keys(trTurnConfig.travel.incident.turnIntensityByCategory)) {
+  trTurnConfig.travel.incident.turnIntensityByCategory[cat] = 1;
+}
+const trTurn = buildTravelWorld(trTurnConfig);
+trTurn.travel.startTravel(trNextDest(trTurn));
+const trTurnIncident = trTurn.travel.getIncident(0);
+assert.equal(trTurnIncident.resolutionMode, 'turn', 'the retuned tables must roll a requires-a-real-turn incident');
+assert.equal(trTurnIncident.outcome, 'auto-passthrough', "this pass resolves 'turn' incidents as a narrated pass-through, never a hard block");
+assert.ok(['fought', 'talked'].includes(trTurnIncident.passthroughFlavor), 'the pass-through carries its rolled flavor');
+assert.notEqual(
+  trTurnIncident.narration,
+  fallbackTravelNarration({ ...trTurnIncident, category: 'none', outcome: 'none' }),
+  "the pass-through narration must be clearly distinct from a quiet leg's"
+);
+const trTurnTicks = trTickToCompletion(trTurn);
+assert.equal(trTurn.travel.getActiveActivity(), null, 'the turn-mode leg still completes');
+console.log(`TR5 PASSED: 'turn' incident (${trTurnIncident.category}, intensity ${trTurnIncident.intensity}) auto-passthrough ('${trTurnIncident.passthroughFlavor}') — facts logged, travel arrived after ${trTurnTicks} ticks`);
+
+// --- TR6: every cache equals its own from-scratch rebuild, idle AND mid-leg.
+assert.equal(trA.travel.rebuildPlayerNodeId(), trA.travel.getPlayerNodeId(), 'position cache must equal its own rebuild');
+assert.deepEqual(trA.travel.rebuildIncidents(), trA.travel.getIncidents(), 'incident cache must equal its own rebuild');
+assert.equal(trA.travel.rebuildActiveActivity(), null, 'idle ⇒ no derived activity');
+assert.equal(trA.travel.getActiveActivity(), null, 'idle ⇒ no cached activity');
+trA.travel.startTravel(trNextDest(trA));
+trA.tick.simulateTicks(2);
+assert.deepEqual(trA.travel.rebuildActiveActivity(), trA.travel.getActiveActivity(), 'mid-leg progress cache must equal its own rebuild');
+trTickToCompletion(trA);
+assert.equal(trA.travel.rebuildPlayerNodeId(), trA.travel.getPlayerNodeId(), 'post-arrival position cache must equal its own rebuild');
+console.log('TR6 PASSED: position, incident, and in-flight-activity caches all equal their own from-scratch rebuilds');
+
+// --- TR7: tick-driven arrival lands on the EXACT expected tick (the full
+// final tick counts — the accepted overshoot), the player lands at the chosen
+// adjacent node, the context returns to idle, and arrival materializes the
+// destination's neighbors so onward edges exist.
+const trDest7 = trNextDest(trA);
+const trStart7 = trA.travel.startTravel(trDest7);
+const trTravelingMult = trA.world.getState().config.timeDilation.multipliers.traveling;
+const trExpectedTicks = Math.ceil(trStart7.payload.durationGameSeconds / trTravelingMult);
+const trTicks7 = trTickToCompletion(trA);
+assert.equal(trTicks7, trExpectedTicks, 'arrival must fire on exactly the tick that crosses the duration');
+assert.equal(trA.travel.getPlayerNodeId(), trDest7, 'the player must land at the chosen adjacent node');
+assert.equal(trA.clock.getActiveTimeContext(), 'idle', 'arrival must return the context to idle');
+assert.equal(trA.map.isMaterialized(trDest7), true, "arrival must materialize the destination's neighbors so onward edges exist");
+console.log(`TR7 PASSED: ${trStart7.payload.durationGameSeconds.toFixed(0)} game-s leg arrived on tick ${trTicks7} of ${trExpectedTicks} expected at ×${trTravelingMult}, destination materialized`);
+
+// --- TR8: guards — travel is edge-only and activities never overlap.
+assert.throws(() => trA.travel.startTravel('node_9999.000_9999.000'), /not adjacent/, 'traveling to a non-adjacent node must throw');
+trA.travel.startTravel(trNextDest(trA));
+assert.throws(() => trA.travel.startTravel(trNextDest(trA)), /already in progress/, 'starting a second leg mid-transit must throw');
+assert.throws(() => trA.travel.startExplore(), /already in progress/, 'exploring mid-transit must throw');
+trTickToCompletion(trA);
+console.log('TR8 PASSED: non-adjacent destinations and overlapping activities are rejected loudly');
+
+// --- TR9: the explore window and the dialogue brackets — the last two
+// timeContexts get their real verbs. Explore: instant roll (poiEngine used
+// as-is), then 'exploring' rides for the configured duration and ends back at
+// idle. Dialogue: startDialogue/endDialogue bracket a ×1 chatting window.
+const trConfig = trA.world.getState().config;
+const trExploreResult = trA.travel.startExplore();
+assert.ok('poiId' in trExploreResult, 'the explore roll resolves instantly (found-or-null), before the window elapses');
+assert.equal(trA.travel.getActiveActivity()?.kind, 'explore', 'the explore window must be open');
+assert.equal(trA.clock.getActiveTimeContext(), 'exploring', "the explore verb's POI_EXPLORED carries timeContext 'exploring'");
+const trExploreTicks = trTickToCompletion(trA);
+assert.equal(
+  trExploreTicks,
+  Math.ceil(trConfig.travel.exploreDurationGameSeconds / trConfig.timeDilation.multipliers.exploring),
+  'the explore window must end on exactly the expected tick'
+);
+assert.equal(trA.clock.getActiveTimeContext(), 'idle', 'the explore window must end back at idle');
+
+const trChatBefore = trA.clock.getTotalGameSeconds();
+startDialogue(trA.world, 'player_rowan', 'npc_mira');
+assert.equal(trA.clock.getActiveTimeContext(), 'chatting', 'startDialogue must set chatting');
+trA.tick.simulateTicks(3);
+assert.equal(trA.clock.getTotalGameSeconds() - trChatBefore, 3 * 1, 'chatting ticks dilate ×1 — the real AI-latency window is the time cost');
+endDialogue(trA.world, 'player_rowan', 'npc_mira');
+assert.equal(trA.clock.getActiveTimeContext(), 'idle', 'endDialogue must restore idle');
+console.log(`TR9 PASSED: explore window ${trExploreTicks} ticks at ×40 (found ${trExploreResult.poiId ?? 'nothing'}), dialogue bracketed chatting ×1 → idle`);
+
+// --- TR10: whole-journey determinism — the identical scripted journey on two
+// fresh worlds produces the identical event log, entry for entry.
+function trRunJourney() {
+  const t = buildTravelWorld();
+  t.travel.startTravel(trNextDest(t));
+  trTickToCompletion(t);
+  t.travel.startExplore();
+  trTickToCompletion(t);
+  t.travel.startTravel(trNextDest(t));
+  trTickToCompletion(t);
+  return t;
+}
+const trJourneyA = trRunJourney();
+const trJourneyB = trRunJourney();
+assert.deepEqual(trJourneyB.world.getEventLog(), trJourneyA.world.getEventLog(), 'the identical journey must produce the identical event log');
+console.log(`TR10 PASSED: two identical journeys ⇒ identical ${trJourneyA.world.getEventLog().length}-event logs`);
+
+console.log('\nSection TR PASSED: real travel/explore/dialogue verbs carry their timeContexts, incidents roll deterministically and commit before narration, and every new cache is rebuildable from the log alone');
+
+// =============================================================================
 // Section SL: save/load — round-tripping the ENTIRE world state.
 //
 // The architecture's core promise, put on trial end to end: raw state is
@@ -2664,7 +2893,8 @@ console.log('\nSection CH PASSED: dialogue history is pair-keyed (order-independ
 // things and NOTHING else, and load is "hand the saved log to a fresh
 // buildSampleWorld, wire a fresh engine set, let every engine prime from the
 // log it finds." A lived-in world — explored map, discovered/injected POIs,
-// faction overrides, a populated settlement, race edits, clock history, and
+// faction overrides, a populated settlement, race edits, clock history,
+// travel legs (one AI-narrated, one mid-transit at save time), and
 // memories INCLUDING AI-enhanced summary text (stubbed generateText) — is
 // serialized to an actual JSON string, reconstructed from that string alone,
 // and every derived read on the reconstruction must equal the original live
@@ -2709,7 +2939,8 @@ function slWireEngines(fan) {
     witnessesAt: (nodeId) => npcGen.rosterIdsAt(nodeId),
   });
   const clock = createWorldClockEngine(fan.world);
-  return { effects, map, poi, faction, npcGen, memory, clock };
+  const travel = createTravelEngine(fan.world, map, poi);
+  return { effects, map, poi, faction, npcGen, memory, clock, travel };
 }
 
 // slBuildLivedInWorld — build a fresh world and LIVE in it: a representative
@@ -2720,7 +2951,7 @@ async function slBuildLivedInWorld() {
   const fan = buildSampleWorld();
   const { world, registry, relationships, conversationHistory, races, mira, rowan, sable } = fan;
   const engines = slWireEngines(fan);
-  const { map, poi, faction, npcGen } = engines;
+  const { map, poi, faction, npcGen, travel } = engines;
 
   // Count expected vs landed enhancements so the settle-wait below is exact:
   // every committed rememberer fires one background enhancement under the stub.
@@ -2786,10 +3017,12 @@ async function slBuildLivedInWorld() {
   assert.ok(expectedEnhancements >= 3, 'the robbery fan-out plus the help must have fired several enhancements');
 
   // Clock history: ticks under two contexts (the POI explores above already
-  // switched the derived context to 'exploring'), plus a flat jump.
+  // switched the derived context to 'exploring'; the real dialogue verbs
+  // bracket a 'chatting' window), plus a flat jump.
   world.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
-  world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'chatting' });
+  startDialogue(world, rowan.id, mira.id);
   world.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
+  endDialogue(world, rowan.id, mira.id);
   world.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 3600 });
 
   // Conversation history: more than RECENT_EXCHANGES_WINDOW exchanges on the
@@ -2802,6 +3035,45 @@ async function slBuildLivedInWorld() {
     conversationHistory.recordDialogueLine(mira.id, rowan.id, mira.id, `Mira replies ${i}.`);
   }
   conversationHistory.recordDialogueLine(mira.id, sable.id, sable.id, 'Rough night at the tables?');
+
+  // Real travel: three legs along the explored graph. Leg one runs under the
+  // live stub so its narration is AI-ENHANCED (the enhancement is settled
+  // before anything else dispatches, so the log's event order is
+  // deterministic); leg two runs with no plugin so its deterministic fallback
+  // narration STAYS; leg three is deliberately left IN TRANSIT so the save
+  // captures an open activity mid-leg (SL15 proves it round-trips and
+  // resumes). Ticks are dispatched raw (1 real-s each), the same channel the
+  // tick source uses.
+  let slTravelEnhancements = 0;
+  world.subscribe('TRAVEL_NARRATION_ENHANCED', () => { slTravelEnhancements += 1; });
+  function slNextDest() {
+    const node = map.getNode(travel.getPlayerNodeId());
+    const edge = node.edges.find((e) => e.passable);
+    assert.ok(edge, `SL needs a passable edge out of ${node.id}`);
+    return edge.to;
+  }
+  function slTickToArrival(label) {
+    for (let i = 0; travel.getActiveActivity(); i++) {
+      if (i > 200) throw new Error(`SL: ${label} never arrived`);
+      world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 });
+    }
+  }
+
+  globalThis.generateText = slStubGenerateText;
+  travel.startTravel(slNextDest());
+  for (let i = 0; slTravelEnhancements < 1; i++) {
+    if (i > 2000) throw new Error('SL: travel narration never settled');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  delete globalThis.generateText;
+  slTickToArrival('leg one');
+
+  travel.startTravel(slNextDest()); // no plugin: the fallback narration stays
+  slTickToArrival('leg two');
+
+  travel.startTravel(slNextDest());
+  world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 }); // partial progress only
+  assert.ok(travel.getActiveActivity(), 'SL leaves leg three open — the save must capture an in-transit activity');
 
   return { ...fan, ...engines, village, hamlet, victim, exploredNodeIds };
 }
@@ -2999,13 +3271,47 @@ assert.deepEqual(
 );
 console.log(`SL14 PASSED: conversation history round-trips pair-keyed and thread-isolated — Mira<->Rowan ${slMiraRowanA.length} lines, Mira<->Sable ${slMiraSableA.length} line(s), loaded cache equals its own rebuild`);
 
+// --- SL15: travel — position, the full incident history (including the
+// AI-enhanced narration line, which must replay from its own log event), and
+// the IN-TRANSIT leg all round-trip; loaded caches equal their own rebuilds;
+// and the loaded mid-leg world RESUMES — continued ticks complete the leg
+// exactly as the original session would have.
+assert.equal(slL.travel.getPlayerNodeId(), slA.travel.getPlayerNodeId(), 'player position must round-trip');
+assert.deepEqual(slL.travel.getIncidents(), slA.travel.getIncidents(), 'the full incident history must round-trip');
+const slIncidents = slA.travel.getIncidents();
+assert.equal(slIncidents.length, 3, 'three legs ⇒ three incidents (exactly one each, quiet legs included)');
+assert.equal(
+  slIncidents[0].narration,
+  'someone will not forget what the player did today.',
+  "leg one's narration must be the stub-AI line (the enhancement event replayed), not the fallback"
+);
+assert.equal(
+  slIncidents[1].narration,
+  fallbackTravelNarration(slIncidents[1]),
+  "leg two's narration must be the deterministic fallback (no plugin was live)"
+);
+assert.ok(slA.travel.getActiveActivity(), 'the save was taken mid-leg — the original world was still traveling');
+assert.deepEqual(slL.travel.getActiveActivity(), slA.travel.getActiveActivity(), 'the open in-transit activity (with its elapsed progress) must round-trip');
+assert.equal(slL.travel.rebuildPlayerNodeId(), slL.travel.getPlayerNodeId(), 'loaded position cache must equal its own rebuild');
+assert.deepEqual(slL.travel.rebuildIncidents(), slL.travel.getIncidents(), 'loaded incident cache must equal its own rebuild');
+assert.deepEqual(slL.travel.rebuildActiveActivity(), slL.travel.getActiveActivity(), 'loaded activity cache must equal its own rebuild');
+
+const slResumeDest = slL.travel.getActiveActivity().toNodeId;
+for (let i = 0; slL.travel.getActiveActivity(); i++) {
+  if (i > 200) throw new Error('SL15: the loaded in-transit leg never arrived');
+  slL.world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 });
+}
+assert.equal(slL.travel.getPlayerNodeId(), slResumeDest, 'the loaded world resumes the leg and arrives at the destination the original chose');
+console.log(`SL15 PASSED: travel round-trips — position, ${slIncidents.length} incidents (AI-enhanced and fallback narration both), and the open mid-leg activity, which resumed and arrived after load`);
+
 console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read matches the original exactly');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
 // transport plumbing, fallback + contract enforcement, memory fan-out, the
 // permanent-voice / transient-emotion derivations, pair-keyed conversation
-// history, and the full save/load round-trip of the entire world state.
+// history, the travel/explore verbs with their seeded incident system, and
+// the full save/load round-trip of the entire world state.
 // Real live-AI verification
 // (dialogue lines AND memory-summary lines) can only happen by hand inside an
 // actual Perchance page.
