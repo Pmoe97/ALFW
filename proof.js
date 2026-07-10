@@ -43,6 +43,8 @@ import {
   deriveCalendarDate,
   deriveActiveTimeContext,
   deriveTotalGameSeconds,
+  deriveTimeOfDayBucket,
+  TIME_OF_DAY_BUCKETS,
 } from './engines/worldClockEngine.js';
 import { createTickSource } from './game/tickSource.js';
 import {
@@ -80,7 +82,13 @@ import {
   deriveNpcRoster,
   deriveNodePopulation,
   derivePopulationSize,
+  deriveScheduleState,
+  deriveSchedulePattern,
   NODE_POPULATED,
+  VOCATION_WORKPLACE_CATEGORY,
+  NOCTURNAL_VOCATIONS,
+  VOCATIONS_SETTLEMENT,
+  VOCATIONS_WILDERNESS,
 } from './engines/npcGeneratorEngine.js';
 import { deriveVoiceDirectives, CONFLICTING_PAIRS, AXIS_DIRECTIVES, MAX_DIRECTIVES } from './entities/voice.js';
 import { deriveEmotion } from './entities/deriveEmotion.js';
@@ -2489,6 +2497,293 @@ console.log(
 );
 
 // =============================================================================
+// Section SC: NPC schedules — a permanent intra-node pattern at birth, a pure
+// transient state read, and schedule-aware witness presence.
+//
+// The permanent/transient split is the voice-vs-emotion discipline applied to
+// location: the schedule PATTERN is a birth fact (two rng draws appended after
+// every existing draw in deriveNpc, riding the NODE_POPULATED birth snapshot —
+// no new event type, no new stored state), while the CURRENT state is
+// deriveScheduleState(pattern, hour) — pure, zero rng, recomputed at read time
+// and stored nowhere. Presence for memoryEngine's witness fan-out becomes
+// roster ∩ schedule-available, wired entirely in the witnessesAt adapter:
+// asleep NPCs witness nothing, the direct target always remembers. Cross-node
+// schedules are explicitly out of scope (lazy node generation — see the
+// npcGeneratorEngine header); every location a schedule references is the home
+// node's own baseline POI pool or a symbolic intra-node id.
+// =============================================================================
+console.log('\n=== Section SC: NPC schedules (permanent pattern, pure state read, presence-aware witnesses) ===');
+
+function runSectionSC(record) {
+  const cfg = mapConfigWith();
+  const synthVillage = (x, y) => ({
+    id: `syn_sc_village_${x}_${y}`,
+    x,
+    y,
+    classification: { kind: 'settlement', tier: 'village', settlementId: `syn_sc_village_${x}_${y}`, baselineFaction: null, notability: null, hospitability: null },
+  });
+  const synthWild = (x, y) => ({
+    id: `syn_sc_wild_${x}_${y}`,
+    x,
+    y,
+    classification: { kind: 'wilderness', tier: null, settlementId: null, baselineFaction: null, notability: 0.7, hospitability: 0.7 },
+  });
+  const scEnabledRaces = () => {
+    const table = deriveRaceRegistry(cfg, []);
+    return Object.keys(table)
+      .sort()
+      .map((id) => ({ id, ...table[id] }))
+      .filter((r) => r.enabled && r.weight > 0);
+  };
+  const enabled = scEnabledRaces();
+  const isAsleepAt = (npc, bucket) => {
+    const entry = npc.schedule.find((e) => e.timeOfDay === bucket);
+    return entry?.availability === 'asleep';
+  };
+
+  // --- SC0: the bucket function is total over 0-23 and throws outside it -----
+  {
+    const byBucket = new Map(TIME_OF_DAY_BUCKETS.map((b) => [b, []]));
+    for (let hour = 0; hour <= 23; hour++) {
+      const bucket = deriveTimeOfDayBucket(hour);
+      assert.ok(TIME_OF_DAY_BUCKETS.includes(bucket), `hour ${hour} must map into TIME_OF_DAY_BUCKETS (got ${bucket})`);
+      byBucket.get(bucket).push(hour);
+    }
+    for (const bucket of TIME_OF_DAY_BUCKETS) {
+      assert.ok(byBucket.get(bucket).length > 0, `bucket '${bucket}' must own at least one hour`);
+    }
+    const boundaries = [[4, 'night'], [5, 'morning'], [11, 'morning'], [12, 'day'], [17, 'day'], [18, 'evening'], [21, 'evening'], [22, 'night'], [0, 'night']];
+    for (const [hour, expected] of boundaries) {
+      assert.equal(deriveTimeOfDayBucket(hour), expected, `hour ${hour} must bucket as '${expected}'`);
+    }
+    for (const bad of [-1, 24, 6.5]) {
+      assert.throws(() => deriveTimeOfDayBucket(bad), `deriveTimeOfDayBucket must throw on ${bad}`);
+    }
+    const epochHour = deriveCalendarDate(cfg, 0).hour;
+    assert.equal(epochHour, 6, 'the shipped epoch starts at hour 6');
+    assert.equal(deriveTimeOfDayBucket(epochHour), 'morning', 'the epoch hour buckets as morning — a fresh world wakes up in daylight');
+    record(`SC0 PASSED: deriveTimeOfDayBucket is total over hours 0-23 (${TIME_OF_DAY_BUCKETS.map((b) => `${b}:${byBucket.get(b).length}h`).join(', ')}), throws outside, and the epoch (hour 6) is morning`);
+  }
+
+  // --- SC1: the pattern is a deterministic, well-formed birth fact ------------
+  // Same (config, node, enabledRaces) => byte-identical schedules (the AP1
+  // purity idiom — permanence and reproducibility are the same statement for a
+  // pure function). Every generated NPC carries exactly one entry per bucket,
+  // explicit availability on all four, and both an asleep and an awake stretch.
+  // Clock-advance immunity needs no new assertion here: N1's world C populates
+  // AFTER advancing the clock and deep-equals the full birth snapshots, which
+  // now carry the schedule — a clock leak into the pattern would fail N1.
+  {
+    const node = synthVillage(9700, 9700);
+    const rosterA = deriveNpcRoster(cfg, node, enabled);
+    const rosterB = deriveNpcRoster(cfg, node, enabled);
+    assert.ok(rosterA.length > 0, 'the synthetic village must populate for this check to mean anything');
+    assert.deepEqual(
+      rosterA.map((n) => n.schedule),
+      rosterB.map((n) => n.schedule),
+      'same inputs reproduce byte-identical schedule patterns for every NPC'
+    );
+    for (const npc of rosterA) {
+      assert.equal(npc.schedule.length, TIME_OF_DAY_BUCKETS.length, 'a generated schedule is dense: exactly one entry per bucket');
+      assert.deepEqual(
+        [...npc.schedule.map((e) => e.timeOfDay)].sort(),
+        [...TIME_OF_DAY_BUCKETS].sort(),
+        'the four entries cover each time-of-day bucket exactly once'
+      );
+      for (const entry of npc.schedule) {
+        assert.equal(typeof entry.locationId, 'string', 'every entry names a string locationId');
+        assert.equal(typeof entry.activity, 'string', 'every entry names a string activity');
+        assert.ok(['awake', 'asleep'].includes(entry.availability), 'every generated entry carries an explicit availability');
+      }
+      assert.ok(npc.schedule.some((e) => e.availability === 'asleep'), 'everyone sleeps sometime');
+      assert.ok(npc.schedule.some((e) => e.availability === 'awake'), 'everyone is awake sometime');
+    }
+    record(`SC1 PASSED: all ${rosterA.length} generated schedules are byte-reproducible, dense over the four buckets, explicitly availability-marked, and include both sleep and waking stretches`);
+  }
+
+  // --- SC2: vocation -> workplace binding, its fallback, and intra-node scope -
+  {
+    // Key-set audit (the AP0 idiom): every vocation in either draw pool has an
+    // explicit workplace mapping — a vocation added without one fails loudly.
+    assert.deepEqual(
+      Object.keys(VOCATION_WORKPLACE_CATEGORY).sort(),
+      [...VOCATIONS_SETTLEMENT, ...VOCATIONS_WILDERNESS].sort(),
+      'VOCATION_WORKPLACE_CATEGORY keys must exactly cover both vocation pools'
+    );
+    assert.ok(NOCTURNAL_VOCATIONS.every((v) => v in VOCATION_WORKPLACE_CATEGORY), 'every nocturnal vocation is a known vocation');
+
+    // Deterministic scan for a village whose baseline pool contains a shop —
+    // the workplace-binding case (the findVillagesWithRace idiom).
+    let shopVillage = null;
+    let shopPoi = null;
+    for (let i = 0; i < 5000 && !shopVillage; i++) {
+      const node = synthVillage((i % 100) * 7 + 5000, Math.floor(i / 100) * 7 + 5000);
+      const poi = deriveBaselinePois(cfg, node).find((p) => p.category === 'shop');
+      if (poi) { shopVillage = node; shopPoi = poi; }
+    }
+    assert.ok(shopVillage, 'Section SC: no synthetic village with a shop POI found (config drift?)');
+
+    // A baker at that village works AT the shop POI — the schedule references
+    // the node's own baseline pool, independent of player discovery (the pool
+    // read is deriveBaselinePois, which never touches the discovery log).
+    const baker = deriveSchedulePattern(cfg, shopVillage, 'baker', 0.9, 0.9);
+    assert.equal(baker.find((e) => e.timeOfDay === 'morning').locationId, shopPoi.id, "the baker's morning entry is the village's own shop POI");
+    assert.deepEqual(baker, deriveSchedulePattern(cfg, shopVillage, 'baker', 0.9, 0.9), 'deriveSchedulePattern is pure in its arguments');
+
+    // Fallbacks: a null-mapped vocation (farmer works the fields), and a
+    // mapped-but-absent category (a village has no keep, so a day-shift guard
+    // patrols out and about) — never a nonsensical assignment.
+    const farmer = deriveSchedulePattern(cfg, shopVillage, 'farmer', 0.9, 0.9);
+    assert.equal(farmer.find((e) => e.timeOfDay === 'morning').locationId, 'out_and_about', 'a null-mapped vocation falls back to out_and_about');
+    assert.ok(!deriveBaselinePois(cfg, shopVillage).some((p) => p.category === 'keep'), 'a village pool never contains a keep (tier-gated city+)');
+    const dayGuard = deriveSchedulePattern(cfg, shopVillage, 'guard', 0.9, 0.9);
+    assert.equal(dayGuard.find((e) => e.timeOfDay === 'morning').locationId, 'out_and_about', 'a mapped-but-absent category falls back to out_and_about');
+
+    // Shift split: the same guard under a low shift draw is nocturnal — asleep
+    // in the morning, working the night; always-nocturnal vocations need no
+    // draw at all (a wilderness outlaw works nights at the camp when one
+    // exists, out and about otherwise).
+    const nightGuard = deriveSchedulePattern(cfg, shopVillage, 'guard', 0.1, 0.9);
+    assert.equal(nightGuard.find((e) => e.timeOfDay === 'morning').availability, 'asleep', 'a night-shift guard sleeps through the morning');
+    assert.equal(nightGuard.find((e) => e.timeOfDay === 'night').availability, 'awake', 'a night-shift guard works the night');
+    const wildNode = synthWild(5200, 5200);
+    const outlaw = deriveSchedulePattern(cfg, wildNode, 'outlaw', 0.9, 0.9);
+    assert.equal(outlaw.find((e) => e.timeOfDay === 'morning').availability, 'asleep', 'an outlaw is nocturnal regardless of the shift draw');
+    const wildCamp = deriveBaselinePois(cfg, wildNode).find((p) => p.category === 'camp');
+    assert.equal(
+      outlaw.find((e) => e.timeOfDay === 'night').locationId,
+      wildCamp ? wildCamp.id : 'out_and_about',
+      "the outlaw's night work location is the node's own camp POI when one exists, out_and_about otherwise"
+    );
+
+    // Intra-node containment — the scope rule made checkable: every location a
+    // generated schedule references is 'home', 'out_and_about', or a baseline
+    // POI id OF THE NPC'S OWN NODE. No schedule ever points at another node.
+    const roster = deriveNpcRoster(cfg, shopVillage, enabled);
+    const ownPoiIds = new Set(deriveBaselinePois(cfg, shopVillage).map((p) => p.id));
+    for (const npc of roster) {
+      for (const entry of npc.schedule) {
+        assert.ok(
+          entry.locationId === 'home' || entry.locationId === 'out_and_about' || ownPoiIds.has(entry.locationId),
+          `schedule location ${entry.locationId} must be intra-node (home, out_and_about, or an own-node baseline POI)`
+        );
+      }
+    }
+    record(`SC2 PASSED: the workplace map exactly covers all ${Object.keys(VOCATION_WORKPLACE_CATEGORY).length} vocations; a baker binds to the village's own shop POI while farmer (null-mapped) and village guard (keep absent) fall back to out_and_about; guard shift and nocturnal vocations behave; every generated location is intra-node`);
+  }
+
+  // --- SC3: deriveScheduleState — pure, and honest about sparse schedules -----
+  // The Mira-shaped fixture matches the hand-authored convention exactly:
+  // sparse entries (no 'day' bucket), NO availability field, night activity
+  // 'sleeping'. The read is pure, falls back to the sleeping convention, and
+  // defaults missing buckets and missing schedules to present-and-available so
+  // hand-authored NPCs and players never silently vanish from the world.
+  {
+    const sparse = [
+      { timeOfDay: 'morning', locationId: 'tavern_fixture', activity: 'restocking the cellar' },
+      { timeOfDay: 'evening', locationId: 'tavern_fixture', activity: 'tending the bar' },
+      { timeOfDay: 'night', locationId: 'tavern_fixture_upstairs', activity: 'sleeping' },
+    ];
+    assert.deepEqual(deriveScheduleState(sparse, 8), deriveScheduleState(sparse, 8), 'deriveScheduleState is pure');
+    const morning = deriveScheduleState(sparse, 8);
+    assert.deepEqual(morning, { bucket: 'morning', locationId: 'tavern_fixture', activity: 'restocking the cellar', available: true }, 'a hand-authored morning entry reads as present and available');
+    const night = deriveScheduleState(sparse, 23);
+    assert.equal(night.available, false, "a hand-authored night entry with activity 'sleeping' reads as unavailable via the convention (no availability field needed)");
+    const missingBucket = deriveScheduleState(sparse, 14);
+    assert.deepEqual(missingBucket, { bucket: 'day', locationId: 'home', activity: 'going about the day', available: true }, 'a missing bucket defaults to at-home-and-available, never vanished');
+    assert.equal(deriveScheduleState([], 14).available, true, 'an empty schedule reads as available');
+    assert.equal(deriveScheduleState(undefined, 14).available, true, 'a missing schedule reads as available (players, pre-schedule entities)');
+    const explicitWins = deriveScheduleState([{ timeOfDay: 'day', locationId: 'home', activity: 'dozing by the fire', availability: 'asleep' }], 14);
+    assert.equal(explicitWins.available, false, "an explicit availability:'asleep' wins over activity text that never says 'sleeping'");
+    record('SC3 PASSED: deriveScheduleState is pure; hand-authored sparse schedules read correctly (sleeping convention, missing buckets default to available); explicit availability wins');
+  }
+
+  // --- SC4: presence-aware witness fan-out, end to end -------------------------
+  // A full world: populate a village that holds both a nocturnal NPC (a
+  // night-shift guard — the only settlement nocturnal) and sleeping diurnals,
+  // jump the clock to the dead of night, rob a diurnal victim, and read the
+  // committed MEMORY_RECORDED: the witness set must be EXACTLY the
+  // schedule-available roster minus victim — the nocturnal saw it, the
+  // sleeping neighbors did not, and the victim still remembers (being robbed
+  // in your sleep is still your robbery). Then the same robbery at midday
+  // fans out to the whole roster: the night witness set is a strict subset.
+  {
+    // Deterministic scan for a village roster holding >=1 nocturnal and >=2
+    // diurnal NPCs (so the night set is strictly smaller than the day set).
+    let scNode = null;
+    for (let i = 0; i < 5000 && !scNode; i++) {
+      const node = synthVillage((i % 100) * 7 + 6000, Math.floor(i / 100) * 7 + 6000);
+      const roster = deriveNpcRoster(cfg, node, enabled);
+      const nocturnals = roster.filter((n) => isAsleepAt(n, 'morning')).length;
+      const diurnals = roster.filter((n) => isAsleepAt(n, 'night')).length;
+      if (nocturnals >= 1 && diurnals >= 2) scNode = node;
+    }
+    assert.ok(scNode, 'Section SC: no synthetic village with both a nocturnal and >=2 diurnal NPCs found (config drift?)');
+
+    const world = createWorldState(cfg);
+    const races = createRaceRegistry(world);
+    const registry = createEntityRegistry(world);
+    const clock = createWorldClockEngine(world);
+    const npcGen = createNpcGeneratorEngine(world, registry, races);
+    createMemoryEngine(world, registry, {
+      witnessesAt: (nodeId) =>
+        npcGen.rosterIdsAt(nodeId).filter(
+          (id) => deriveScheduleState(registry.get(id)?.schedule, clock.getCurrentDate().hour).available
+        ),
+    });
+
+    const roster = npcGen.populateNode(scNode);
+    const victim = roster.find((n) => isAsleepAt(n, 'night'));
+    const nocturnal = roster.find((n) => isAsleepAt(n, 'morning'));
+
+    // Dead of night: epoch hour 6 + 72000 game-s (20h) => 02:00, bucket 'night'.
+    world.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 72000 });
+    assert.equal(clock.getCurrentDate().hour, 2, 'the jump lands at 02:00');
+    assert.equal(deriveTimeOfDayBucket(clock.getCurrentDate().hour), 'night', '02:00 is night');
+
+    const witnessesOf = (memEntry) => memEntry.payload.memories.map((m) => m.entityId).slice(1); // [0] is always the target
+    robNpc(world, 'sc_player', victim.id, scNode.id);
+    const nightMem = world.getEventLog().filter((e) => e.type === 'MEMORY_RECORDED').at(-1);
+    assert.equal(nightMem.payload.memories[0].entityId, victim.id, 'the sleeping victim still remembers — the target is always recorded');
+    const expectedNightWitnesses = npcGen
+      .rosterIdsAt(scNode.id)
+      .filter((id) => id !== victim.id && deriveScheduleState(registry.get(id).schedule, 2).available);
+    assert.deepEqual(witnessesOf(nightMem), expectedNightWitnesses, 'the committed witness set is EXACTLY the schedule-available roster minus the victim');
+    assert.ok(witnessesOf(nightMem).includes(nocturnal.id), 'the nocturnal NPC, awake at 02:00, witnessed the robbery');
+    for (const npc of roster) {
+      if (npc.id === victim.id || !isAsleepAt(npc, 'night')) continue;
+      assert.ok(!witnessesOf(nightMem).includes(npc.id), `${npc.id}, asleep at 02:00, must not witness`);
+      assert.equal(registry.get(npc.id).psychology.memories.length, 0, 'a sleeping NPC accrued no memory of the robbery');
+    }
+    assert.equal(registry.get(victim.id).psychology.memories.length, 1, "the victim's robbery memory landed");
+
+    // Midday: +43200 game-s (12h) => 14:00, bucket 'day' — everyone is awake
+    // by construction (diurnals at work, nocturnals resting but awake), so the
+    // same robbery fans out to the entire roster.
+    world.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 43200 });
+    assert.equal(clock.getCurrentDate().hour, 14, 'the second jump lands at 14:00');
+    robNpc(world, 'sc_player', victim.id, scNode.id);
+    const dayMem = world.getEventLog().filter((e) => e.type === 'MEMORY_RECORDED').at(-1);
+    const everyoneElse = npcGen.rosterIdsAt(scNode.id).filter((id) => id !== victim.id);
+    assert.deepEqual(witnessesOf(dayMem), everyoneElse, 'at midday the whole roster (minus the victim) witnesses');
+    assert.ok(witnessesOf(nightMem).length < witnessesOf(dayMem).length, 'the night witness set is strictly smaller than the day set');
+    assert.ok(witnessesOf(nightMem).every((id) => witnessesOf(dayMem).includes(id)), 'the night witness set is a subset of the day set');
+    record(`SC4 PASSED: at 02:00 the robbery was witnessed by ${witnessesOf(nightMem).length} awake NPC(s) (nocturnal in, ${roster.length - 1 - witnessesOf(nightMem).length} sleeping neighbors out, victim always remembers); at 14:00 the same act fanned out to all ${witnessesOf(dayMem).length} — presence is schedule-aware`);
+  }
+}
+
+const sectionSCLinesA = [];
+runSectionSC((m) => { sectionSCLinesA.push(m); console.log(m); });
+const sectionSCLinesB = [];
+runSectionSC((m) => sectionSCLinesB.push(m));
+assert.deepEqual(sectionSCLinesA, sectionSCLinesB, 'Section SC output must be byte-identical across two full runs');
+console.log(`SC-final PASSED: Section SC produced identical output across two full runs (${sectionSCLinesA.length} lines)`);
+
+console.log(
+  '\nSection SC PASSED: schedule patterns are permanent birth facts (two draws appended after every existing draw, riding the NODE_POPULATED snapshot); the current-state read is pure and stored nowhere; and witness presence is roster ∩ schedule-available — asleep NPCs witness nothing while the victim always remembers'
+);
+
+// =============================================================================
 // Section EM: emotion — a TRANSIENT per-turn read, derived fresh from recent
 // memories + axes and STORED NOWHERE. The load-bearing property: even though
 // nothing is cached, the read is fully reproducible from history (the log
@@ -2781,10 +3076,11 @@ for (let leg = 0; leg < trStarts.length; leg++) {
 console.log(`TR4 PASSED: ${trStarts.length} legs, exactly one TRAVEL_INCIDENT each (quiet legs logged as category:'none')`);
 
 // --- TR5: the requires-a-real-turn branch — under a config retuned so every
-// leg rolls a 'turn' incident, the stakes are committed as real facts (the
-// future combat/social system's hook) but the incident resolves as a narrated
-// auto-passthrough, clearly distinct from a quiet leg, and travel still
-// arrives on schedule instead of hard-blocking on a system that doesn't exist.
+// leg rolls a 'requiresRealTurn' incident, the stakes are committed as real
+// facts (the future combat/social system's hook) but the incident resolves as
+// a narrated auto-passthrough, clearly distinct from a quiet leg, and travel
+// still arrives on schedule instead of hard-blocking on a system that doesn't
+// exist.
 const trTurnConfig = structuredClone(trA.world.getState().config);
 trTurnConfig.travel.incident.incidentChance = 1;
 for (const cat of Object.keys(trTurnConfig.travel.incident.turnIntensityByCategory)) {
@@ -2793,8 +3089,8 @@ for (const cat of Object.keys(trTurnConfig.travel.incident.turnIntensityByCatego
 const trTurn = buildTravelWorld(trTurnConfig);
 trTurn.travel.startTravel(trNextDest(trTurn));
 const trTurnIncident = trTurn.travel.getIncident(0);
-assert.equal(trTurnIncident.resolutionMode, 'turn', 'the retuned tables must roll a requires-a-real-turn incident');
-assert.equal(trTurnIncident.outcome, 'auto-passthrough', "this pass resolves 'turn' incidents as a narrated pass-through, never a hard block");
+assert.equal(trTurnIncident.resolutionMode, 'requiresRealTurn', 'the retuned tables must roll a requires-a-real-turn incident');
+assert.equal(trTurnIncident.outcome, 'auto-passthrough', "this pass resolves 'requiresRealTurn' incidents as a narrated pass-through, never a hard block");
 assert.ok(['fought', 'talked'].includes(trTurnIncident.passthroughFlavor), 'the pass-through carries its rolled flavor');
 assert.notEqual(
   trTurnIncident.narration,
@@ -2803,7 +3099,7 @@ assert.notEqual(
 );
 const trTurnTicks = trTickToCompletion(trTurn);
 assert.equal(trTurn.travel.getActiveActivity(), null, 'the turn-mode leg still completes');
-console.log(`TR5 PASSED: 'turn' incident (${trTurnIncident.category}, intensity ${trTurnIncident.intensity}) auto-passthrough ('${trTurnIncident.passthroughFlavor}') — facts logged, travel arrived after ${trTurnTicks} ticks`);
+console.log(`TR5 PASSED: 'requiresRealTurn' incident (${trTurnIncident.category}, intensity ${trTurnIncident.intensity}) auto-passthrough ('${trTurnIncident.passthroughFlavor}') — facts logged, travel arrived after ${trTurnTicks} ticks`);
 
 // --- TR6: every cache equals its own from-scratch rebuild, idle AND mid-leg.
 assert.equal(trA.travel.rebuildPlayerNodeId(), trA.travel.getPlayerNodeId(), 'position cache must equal its own rebuild');
@@ -2927,18 +3223,25 @@ function slSettlement(id, tier, x, y) {
 // wireEngines — the canonical full-world wiring order, shared verbatim by the
 // original build and the load path (that sharing IS the point: load is the
 // same construction, just against a world whose log is already full).
-// Presence for the memory engine is the generator's roster — the only
-// location signal that exists.
+// Presence for the memory engine is the generator's roster filtered through
+// each NPC's schedule at the current game hour — asleep NPCs witness nothing.
+// The clock is constructed BEFORE npcGen/memory because the adapter reads it;
+// the reorder is safe (the clock subscribes only CLOCK_TICK/CLOCK_JUMP and
+// primes purely from the log — no subscription-order coupling with any other
+// engine), and witnessesAt only runs at dispatch time anyway.
 function slWireEngines(fan) {
   const effects = createRelationshipEffectEngine(fan.world, fan.relationships);
   const map = createWorldMapEngine(fan.world);
   const poi = createPoiEngine(fan.world);
   const faction = createFactionEngine(fan.world);
+  const clock = createWorldClockEngine(fan.world);
   const npcGen = createNpcGeneratorEngine(fan.world, fan.registry, fan.races);
   const memory = createMemoryEngine(fan.world, fan.registry, {
-    witnessesAt: (nodeId) => npcGen.rosterIdsAt(nodeId),
+    witnessesAt: (nodeId) =>
+      npcGen.rosterIdsAt(nodeId).filter(
+        (id) => deriveScheduleState(fan.registry.get(id)?.schedule, clock.getCurrentDate().hour).available
+      ),
   });
-  const clock = createWorldClockEngine(fan.world);
   const travel = createTravelEngine(fan.world, map, poi);
   return { effects, map, poi, faction, npcGen, memory, clock, travel };
 }
@@ -3001,7 +3304,9 @@ async function slBuildLivedInWorld() {
   const victim = roster[0];
 
   // Memories under the live-AI stub: a witnessed robbery at the village (the
-  // whole roster fans out) and an unwitnessed help of a hand-authored NPC.
+  // schedule-available roster fans out — it happens at hour 6, 'morning', so
+  // diurnal NPCs witness while any night-shift guards sleep through it) and an
+  // unwitnessed help of a hand-authored NPC.
   // Every rememberer's template line is then enhanced via the stub, each
   // enhancement landing as a MEMORY_SUMMARY_ENHANCED log event.
   globalThis.generateText = slStubGenerateText;
@@ -3177,7 +3482,12 @@ assert.deepEqual(
 );
 assert.deepEqual(slL.npcGen.getPopulation(slA.village).map((n) => n.id), slA.npcGen.getPopulation(slA.village).map((n) => n.id), 'the village roster must round-trip');
 assert.deepEqual(slL.npcGen.rebuildNodePopulation(slA.village.id).map((n) => n.id), slL.npcGen.getPopulation(slA.village).map((n) => n.id), 'loaded roster cache must equal its own rebuild');
-console.log('SL10 PASSED: transient derived reads (emotion, rosters) reproduce identically from the loaded world');
+assert.deepEqual(
+  deriveScheduleState(slVictimL.schedule, slL.clock.getCurrentDate().hour),
+  deriveScheduleState(slVictimA.schedule, slA.clock.getCurrentDate().hour),
+  'the schedule-state read must reproduce identically from the loaded world (pattern rides the birth snapshot; the state is derived, never stored)'
+);
+console.log('SL10 PASSED: transient derived reads (emotion, rosters, schedule state) reproduce identically from the loaded world');
 
 // --- SL11: saving the loaded world reproduces the original save byte for
 // byte — load is lossless, so save->load->save is a fixed point.
@@ -3309,9 +3619,10 @@ console.log('\nSection SL PASSED: the entire world state round-trips through (co
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
 // transport plumbing, fallback + contract enforcement, memory fan-out, the
-// permanent-voice / transient-emotion derivations, pair-keyed conversation
-// history, the travel/explore verbs with their seeded incident system, and
-// the full save/load round-trip of the entire world state.
+// permanent-voice / transient-emotion derivations, NPC schedules with
+// presence-aware witnesses, pair-keyed conversation history, the
+// travel/explore verbs with their seeded incident system, and the full
+// save/load round-trip of the entire world state.
 // Real live-AI verification
 // (dialogue lines AND memory-summary lines) can only happen by hand inside an
 // actual Perchance page.

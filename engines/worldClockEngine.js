@@ -135,6 +135,28 @@ export function deriveCalendarDate(config, totalGameSeconds) {
   return { year, monthIndex, monthName, week, day, hour, minute, second };
 }
 
+// The named time-of-day buckets, in day order. These are the vocabulary that
+// NPC schedule entries key on (ScheduleEntry.timeOfDay) — the hand-authored
+// 'morning'/'evening'/'night' strings predate this list and are members of it;
+// 'day' is the only name the bucketing introduced.
+export const TIME_OF_DAY_BUCKETS = Object.freeze(['morning', 'day', 'evening', 'night']);
+
+// deriveTimeOfDayBucket — PURE: calendar hour (0-23) -> named time-of-day
+// bucket. Boundaries are code constants, not config (the same call as
+// SECONDS_PER_HOUR above and the draw pools in npcGeneratorEngine — content
+// constants live in code). The shipped calendar (secondsPerGameDay 86400)
+// always yields an integer hour 0-23 from deriveCalendarDate; anything else
+// reaching here is a caller bug and throws rather than mis-bucketing.
+export function deriveTimeOfDayBucket(hour) {
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+    throw new Error(`deriveTimeOfDayBucket: hour must be an integer 0-23, got ${hour}`);
+  }
+  if (hour >= 5 && hour < 12) return 'morning'; // 05-11
+  if (hour >= 12 && hour < 18) return 'day';    // 12-17
+  if (hour >= 18 && hour < 22) return 'evening'; // 18-21
+  return 'night';                                // 22-23, 00-04
+}
+
 // createWorldClockEngine — the engine. Same contract as the other engines: a
 // named factory taking `world`, subscribing in its body, returning methods, and
 // talking to nothing but `world`.

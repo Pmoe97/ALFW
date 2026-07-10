@@ -6,20 +6,22 @@
 // MemoryRef (pointing at the real source entry via its seq) onto the
 // psychology.memories of each named rememberer. Two halves:
 //
-//   WHO REMEMBERS — the direct target always does. If the event names a nodeId
-//   and a `presence` source is wired, the OTHER NPCs at that node remember it
-//   too, as witnesses. The "same node = present together" rule is an explicit
-//   STAND-IN for real presence/schedule tracking, which ALFW does not have yet
-//   (NPC schedules / location-by-time-of-day are still unchecked on the
-//   tracker). It leans on the only location signal that exists — the node an
-//   NPC was generated at (npcGeneratorEngine.rosterIdsAt) — the same stand-in
-//   discipline the debug time-context switch followed until travelEngine's
-//   real verbs retired it. Swap it for a real "who is physically here now"
-//   query when schedules land.
+//   WHO REMEMBERS — the direct target always does (being robbed in your sleep
+//   is still your robbery). If the event names a nodeId and a `presence`
+//   source is wired, the OTHER NPCs it reports present remember it too, as
+//   witnesses. With schedules landed, presence is roster ∩
+//   schedule-available: the wiring adapter filters the node's roster
+//   (npcGeneratorEngine.rosterIdsAt) through deriveScheduleState at the
+//   current game hour, so asleep NPCs witness nothing. The old "same node =
+//   present together" stand-in is thus retired for AVAILABILITY, while
+//   node-level location remains birth-node only — cross-node schedules are
+//   deferred (see npcGeneratorEngine's header on lazy node generation). This
+//   engine never looks behind the witnessesAt contract either way.
 //
 //   WHY the resolution is COMMITTED rather than re-derived: `presence` is an
-//   injected collaborator (a stub in the harness, rosterIdsAt in a full
-//   world), so who-was-present is NOT a pure function of the log — it is a
+//   injected collaborator (a stub in the harness, the schedule-filtered
+//   roster in a full world), so who-was-present is NOT a pure function of the
+//   log — the clock moves between record and replay — and it is a
 //   live decision, exactly like relationshipEffectEngine's delta rules. The
 //   decision is therefore resolved once, live, and dispatched as
 //   MEMORY_RECORDED { sourceSeq, sourceType, memories } — the same

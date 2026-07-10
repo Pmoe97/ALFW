@@ -33,9 +33,16 @@
 
 /**
  * @typedef {Object} ScheduleEntry
- * @property {string} timeOfDay
- * @property {string} locationId
+ * @property {string} timeOfDay - a TIME_OF_DAY_BUCKETS name ('morning' | 'day'
+ *   | 'evening' | 'night'; see worldClockEngine.deriveTimeOfDayBucket)
+ * @property {string} locationId - a baseline POI id, a symbolic id ('home',
+ *   'out_and_about'), or a hand-authored free-form location string
  * @property {string} activity
+ * @property {('awake'|'asleep')=} availability - OPTIONAL presence marker read
+ *   by npcGeneratorEngine.deriveScheduleState for witness fan-out. Generated
+ *   schedules always carry it; hand-authored entries that predate the field
+ *   fall back to the activity === 'sleeping' convention (which the shipped
+ *   hand-authored night entries already satisfy verbatim).
  */
 
 /**
