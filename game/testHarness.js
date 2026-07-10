@@ -22,10 +22,11 @@ import { createWorldClockEngine } from '../engines/worldClockEngine.js';
 import { createTickSource } from './tickSource.js';
 import { helpNpc, robNpc, ignoreNpc } from '../actions/playerActions.js';
 import { relationshipTier } from '../entities/relationshipStore.js';
+import { getRecentHistory } from '../entities/conversationHistoryStore.js';
 import { getDialogue } from '../ai/getDialogue.js';
 import { log, setChannelEnabled } from '../debugLog.js';
 
-const { world, registry, relationships, mira, rowan, sable } = buildSampleWorld();
+const { world, registry, relationships, conversationHistory, mira, rowan, sable } = buildSampleWorld();
 createRelationshipEffectEngine(world, relationships);
 
 // Memory fan-out demo. The full generator isn't running in this hand-authored
@@ -163,13 +164,17 @@ document.getElementById('btn-ignore').addEventListener('click', () => {
 document.getElementById('btn-talk').addEventListener('click', async () => {
   const playerLine = playerInputEl.value;
   const edge = relationships.getRelationship(mira.id, rowan.id);
-  const result = await getDialogue(mira, edge, mira.psychology.memories, playerLine, world.getEventLog());
+  const recentHistory = getRecentHistory(conversationHistory.getConversationHistory(mira.id, rowan.id));
+  const result = await getDialogue(mira, edge, mira.psychology.memories, playerLine, world.getEventLog(), recentHistory);
+  conversationHistory.recordDialogueLine(mira.id, rowan.id, rowan.id, playerLine);
+  conversationHistory.recordDialogueLine(mira.id, rowan.id, mira.id, result.response.dialogue);
   log('TestHarness', 'dialogue result:', result);
   dialogueOutputEl.textContent = JSON.stringify(
     { source: result.source, dialogue: result.response.dialogue },
     null,
     2
   );
+  render();
 });
 
 render();

@@ -9,6 +9,7 @@
 import { createWorldState } from '../worldState.js';
 import { createNpc, createPlayer } from '../entities/entitySchema.js';
 import { createRelationshipStore } from '../entities/relationshipStore.js';
+import { createConversationHistoryStore } from '../entities/conversationHistoryStore.js';
 import { createEntityRegistry } from '../entities/entityRegistry.js';
 import { createRaceRegistry } from '../entities/raceRegistry.js';
 import { diffConfigKeys } from './saveLoad.js';
@@ -534,6 +535,11 @@ export function buildSampleWorld({ save } = {}) {
   // that dispatches relationship events) or the cache would miss these events.
   const relationships = createRelationshipStore(world);
 
+  // conversationHistory: pair-keyed verbatim dialogue log, built alongside
+  // relationships for the same reason — it subscribes to DIALOGUE_LINE in its
+  // constructor and must exist before any dispatch of that event.
+  const conversationHistory = createConversationHistoryStore(world);
+
   // Seed the starting edges. Stats are log-derived, so the starting values are
   // dispatched as RELATIONSHIP_EVENTs (one per non-zero axis) — but ONLY on a
   // fresh world: a loaded save already carries those events in its log (the
@@ -558,5 +564,5 @@ export function buildSampleWorld({ save } = {}) {
   seedEdge(mira.id, sable.id, { affection: 60, comfort: 24, trust: -40, desire: 0, obedience: 0 }, 'Sable');
   seedEdge(sable.id, mira.id, { affection: 60, comfort: 20, trust: -10, desire: 0, obedience: 0 }, 'Mira');
 
-  return { world, registry, relationships, races, mira, rowan, sable };
+  return { world, registry, relationships, conversationHistory, races, mira, rowan, sable };
 }
