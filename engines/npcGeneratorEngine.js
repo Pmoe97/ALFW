@@ -29,13 +29,19 @@
 // rerolls anyone already committed. Re-invoking populateNode for a populated
 // node is a no-op returning the committed instances.
 //
-// Scope: this pass produces generated instances and the registry mechanics
-// ONLY. Schedules, dialogue/voice wiring, save/load hardening, and population
-// UI are future scope — the same deferral discipline as every prior engine.
+// Scope: this pass produces generated instances, the registry mechanics, and
+// INTRA-NODE schedules (a permanent 4-bucket pattern per NPC, riding the birth
+// snapshot; see deriveSchedulePattern). Cross-node schedules — an NPC
+// scheduled to a DIFFERENT node at different times — are explicitly deferred:
+// worldMapEngine generates nodes lazily on approach, so a schedule cannot
+// reference a neighboring node that may not exist yet without either forcing
+// premature materialization or accepting order-dependent behavior. Dialogue/
+// voice wiring, save/load hardening, and population UI remain future scope.
 
 import { mulberry32 } from '../worldState.js';
 import { hashCoords, mapSeed } from './worldMapEngine.js';
-import { weightedPick } from './poiEngine.js';
+import { weightedPick, deriveBaselinePois } from './poiEngine.js';
+import { deriveTimeOfDayBucket } from './worldClockEngine.js';
 import {
   createNpc,
   PRIMARY_SKILL_ATTRIBUTE,
@@ -108,8 +114,49 @@ const BASE_APPEARANCE_POOLS = Object.freeze({
 const APPEARANCE_FIELD_ORDER = Object.freeze(Object.keys(BASE_APPEARANCE_POOLS));
 
 const DISTINGUISHING_FEATURES = Object.freeze(['a thin scar across one eyebrow', 'a missing half-finger on the left hand', 'a tattoo of a local charm on the wrist', 'ink-stained fingertips', 'a chipped front tooth', 'a burn scar on one forearm', 'a birthmark at the collarbone', 'ears pierced with simple studs']);
-const VOCATIONS_SETTLEMENT = Object.freeze(['farmer', 'baker', 'blacksmith', 'carpenter', 'fisher', 'weaver', 'merchant', 'guard', 'hunter', 'herbalist', 'laborer', 'stablehand', 'seamstress', 'scribe', 'potter', 'butcher']);
-const VOCATIONS_WILDERNESS = Object.freeze(['hermit', 'trapper', 'forager', 'prospector', 'poacher', 'wandering pilgrim', 'camp cook', 'outlaw']);
+// Exported (alongside VOCATION_WORKPLACE_CATEGORY below) so the proof's
+// key-set audit is a true drift-catcher: adding a vocation to either pool
+// without a workplace mapping fails loudly.
+export const VOCATIONS_SETTLEMENT = Object.freeze(['farmer', 'baker', 'blacksmith', 'carpenter', 'fisher', 'weaver', 'merchant', 'guard', 'hunter', 'herbalist', 'laborer', 'stablehand', 'seamstress', 'scribe', 'potter', 'butcher']);
+export const VOCATIONS_WILDERNESS = Object.freeze(['hermit', 'trapper', 'forager', 'prospector', 'poacher', 'wandering pilgrim', 'camp cook', 'outlaw']);
+
+// VOCATION_WORKPLACE_CATEGORY — which baseline-POI category a vocation works
+// at, when the home node's baseline pool contains one. null = no plausible
+// category (works the fields/roads/water); a mapped category ABSENT from the
+// node's pool falls back the same way: locationId 'out_and_about'. Keys
+// exactly cover VOCATIONS_SETTLEMENT + VOCATIONS_WILDERNESS (proof SC2).
+export const VOCATION_WORKPLACE_CATEGORY = Object.freeze({
+  // settlement (16)
+  farmer: null, // the fields
+  baker: 'shop',
+  blacksmith: 'shop',
+  carpenter: 'shop',
+  fisher: null, // the water
+  weaver: 'shop',
+  merchant: 'square', // market stalls
+  guard: 'keep', // city+ only; below that: patrolling out and about
+  hunter: null,
+  herbalist: 'shop',
+  laborer: null,
+  stablehand: null,
+  seamstress: 'shop',
+  scribe: 'guildhall', // town+ only
+  potter: 'shop',
+  butcher: 'shop',
+  // wilderness (8)
+  hermit: 'cave',
+  trapper: 'camp',
+  forager: 'grove',
+  prospector: 'ore_deposit',
+  poacher: 'camp', // nocturnal
+  'wandering pilgrim': 'shrine',
+  'camp cook': 'camp',
+  outlaw: 'camp', // nocturnal
+});
+
+// Always-nocturnal vocations; guards additionally roll a shift (one draw in
+// deriveNpc step 15) — half the watch works nights.
+export const NOCTURNAL_VOCATIONS = Object.freeze(['outlaw', 'poacher']);
 const RELATIONSHIP_STATUSES = Object.freeze(['single', 'single', 'married', 'widowed', 'courting']); // single repeated = cheap weighting
 const LIVING_SITUATIONS_SETTLEMENT = Object.freeze(['lives alone in a small home', 'lives with family', 'rents a room above the workplace', 'lives at the edge of the settlement', 'shares a crowded boarding house']);
 const LIVING_SITUATIONS_WILDERNESS = Object.freeze(['camps rough, moving with the seasons', 'keeps a lone cabin off the trails', 'shelters in a cave dug into the hillside', 'lives out of a wagon']);
@@ -301,6 +348,21 @@ export function deriveNpc(config, node, enabledRaces, i) {
   const accentPhrases = accentEntry.signaturePhrases ?? [];
   const voiceDirectives = deriveVoiceDirectives(personalityAxes);
 
+  // 15. schedule pattern — permanent birth fact, riding the birth snapshot
+  // like every other field. EXACTLY TWO draws, APPENDED after the accent pick
+  // (step 14's final rng consumption; voiceDirectives consumes zero), so every
+  // field in steps 1-14 keeps a byte-identical stream prefix. Both draws are
+  // consumed UNCONDITIONALLY for every NPC — non-guards, nocturnals, and
+  // tavernless nodes included (the deriveTravelIncident fixed-draw
+  // discipline) — so stream position never depends on vocation or the node's
+  // POI pool. Everything else in the pattern is zero-rng: derived from the
+  // already-drawn vocation plus deriveBaselinePois (pure,
+  // discovery-independent), so the pattern reads nothing clock-derived and
+  // N1's clock-advance immunity holds by construction.
+  const scheduleShiftDraw = rng(); // guards only: < 0.5 => night shift
+  const scheduleSocialDraw = rng(); // diurnal only: < 0.5 + tavern present => tavern evenings
+  const schedule = deriveSchedulePattern(config, node, vocation, scheduleShiftDraw, scheduleSocialDraw);
+
   const place = kind === 'settlement' ? node.classification.settlementId : 'the wilds';
   return createNpc({
     id: `npc_${node.id}_g${i}`,
@@ -335,8 +397,49 @@ export function deriveNpc(config, node, enabledRaces, i) {
     },
     capabilities: { attributes, skills: { primary, secondary } },
     inventory: [],
-    schedule: [], // schedules are future scope
+    schedule,
   });
+}
+
+// deriveSchedulePattern — PURE: the permanent 4-entry schedule pattern for one
+// NPC, a function of (config, node, vocation) plus exactly two pre-drawn rng
+// values (drawn by deriveNpc step 15, so THIS function stays rng-free and is
+// directly provable). Workplace resolution goes through deriveBaselinePois —
+// pure and discovery-independent — so an NPC works at their node's smithy/
+// tavern/keep whether or not the player has found it. Every entry covers one
+// TIME_OF_DAY_BUCKETS name and carries an explicit availability; exactly the
+// 'asleep' entries make the NPC invisible to witness fan-out
+// (deriveScheduleState). All locations are WITHIN the home node — cross-node
+// schedules are deferred (see the header note on lazy node generation).
+export function deriveSchedulePattern(config, node, vocation, shiftDraw, socialDraw) {
+  const pois = deriveBaselinePois(config, node);
+  const category = VOCATION_WORKPLACE_CATEGORY[vocation] ?? null;
+  const workplace = category ? pois.find((p) => p.category === category) : undefined;
+  const workLocationId = workplace ? workplace.id : 'out_and_about';
+  const workActivity = workplace
+    ? `working as a ${vocation}`
+    : `out and about, working as a ${vocation}`;
+  const nocturnal =
+    NOCTURNAL_VOCATIONS.includes(vocation) || (vocation === 'guard' && shiftDraw < 0.5);
+
+  if (nocturnal) {
+    return [
+      { timeOfDay: 'morning', locationId: 'home', activity: 'sleeping', availability: 'asleep' },
+      { timeOfDay: 'day', locationId: 'home', activity: "resting before the night's work", availability: 'awake' },
+      { timeOfDay: 'evening', locationId: workLocationId, activity: workActivity, availability: 'awake' },
+      { timeOfDay: 'night', locationId: workLocationId, activity: workActivity, availability: 'awake' },
+    ];
+  }
+  const tavern = pois.find((p) => p.category === 'tavern');
+  const evening = socialDraw < 0.5 && tavern
+    ? { timeOfDay: 'evening', locationId: tavern.id, activity: 'passing the evening at the tavern', availability: 'awake' }
+    : { timeOfDay: 'evening', locationId: 'home', activity: 'settling in at home', availability: 'awake' };
+  return [
+    { timeOfDay: 'morning', locationId: workLocationId, activity: workActivity, availability: 'awake' },
+    { timeOfDay: 'day', locationId: workLocationId, activity: workActivity, availability: 'awake' },
+    evening,
+    { timeOfDay: 'night', locationId: 'home', activity: 'sleeping', availability: 'asleep' },
+  ];
 }
 
 // deriveNpcRoster — the full roster for a node. PURE in
@@ -362,6 +465,30 @@ export function deriveNodePopulation(log, nodeId) {
     return entry.payload.npcs;
   }
   return [];
+}
+
+// deriveScheduleState — PURE, transient: (schedule pattern, calendar hour) ->
+// where the NPC is and whether they are witnessable RIGHT NOW. Never stored,
+// never cached, zero rng — the deriveEmotion discipline (permanent pattern at
+// birth, current state recomputed at read time). Handles three shapes:
+// generated NPCs (dense 4-bucket patterns with explicit availability),
+// hand-authored NPCs (sparse entries with no availability field — it falls
+// back to the activity === 'sleeping' convention their shipped night entries
+// already use), and schedule-less entities (missing bucket / empty schedule
+// => present and available at home, so nobody silently vanishes from the
+// world).
+export function deriveScheduleState(schedule, hour) {
+  const bucket = deriveTimeOfDayBucket(hour);
+  const entry = Array.isArray(schedule)
+    ? schedule.find((e) => e.timeOfDay === bucket)
+    : undefined;
+  if (!entry) {
+    return { bucket, locationId: 'home', activity: 'going about the day', available: true };
+  }
+  const available = entry.availability !== undefined
+    ? entry.availability !== 'asleep'
+    : entry.activity !== 'sleeping';
+  return { bucket, locationId: entry.locationId, activity: entry.activity, available };
 }
 
 // createNpcGeneratorEngine — the stateful engine. Extends memoryEngine's
@@ -432,10 +559,11 @@ export function createNpcGeneratorEngine(world, registry, races) {
 
   // rosterIdsAt — read-only: the ids of the NPCs committed at a node, [] if it
   // was never populated. Exposes the existing populatedByNode cache (no new
-  // stored state) so the memory engine can answer "who else is here" for
-  // witness fan-out. This is the codebase's only current location signal — the
-  // node an NPC was generated at — and is the honest STAND-IN for real
-  // presence/schedule tracking, which does not exist yet.
+  // stored state). The node an NPC was generated at is still the node-level
+  // location signal (intra-node only — cross-node schedules are deferred, see
+  // the header); AVAILABILITY within that node is now schedule-derived at the
+  // wiring layer, where the memory engine's presence adapter filters this
+  // roster through deriveScheduleState at the current game hour.
   function rosterIdsAt(nodeId) {
     return populatedByNode.get(nodeId) ?? [];
   }

@@ -22,6 +22,7 @@ import { createWorldMapEngine } from '../engines/worldMapEngine.js';
 import { createPoiEngine } from '../engines/poiEngine.js';
 import { createWorldClockEngine } from '../engines/worldClockEngine.js';
 import { createTravelEngine } from '../engines/travelEngine.js';
+import { deriveScheduleState } from '../engines/npcGeneratorEngine.js';
 import { createTickSource } from './tickSource.js';
 import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from '../actions/playerActions.js';
 import { relationshipTier } from '../entities/relationshipStore.js';
@@ -32,26 +33,33 @@ import { log, setChannelEnabled } from '../debugLog.js';
 const { world, registry, relationships, conversationHistory, mira, rowan, sable } = buildSampleWorld();
 createRelationshipEffectEngine(world, relationships);
 
-// Memory fan-out demo. The full generator isn't running in this hand-authored
-// scene, so a tiny presence stub stands in for npcGeneratorEngine.rosterIdsAt:
-// it says Mira and Sable share one node (DEMO_SCENE_NODE). The player verbs
-// below pass that nodeId, so acting on Mira also lands a witnessed memory on
-// Sable — exactly the co-located fan-out the real presence source will drive
-// once schedules/location tracking exist.
-const DEMO_SCENE_NODE = 'demo_scene';
-const presence = {
-  witnessesAt: (nodeId) => (nodeId === DEMO_SCENE_NODE ? [mira.id, sable.id] : []),
-};
-createMemoryEngine(world, registry, presence);
-
-// Map + POI + clock + travel, in the canonical engine order (map → poi →
-// … → clock → travel) and all created BEFORE the tick source starts so the
-// clock and travel engines catch every CLOCK_TICK. The clock owns game-time
-// derivation; the travel engine owns the player's position and the timed
-// travel/explore activities; the tick source below only dispatches ticks.
+// Map + POI + clock, in the canonical engine order (map → poi → clock →
+// memory → travel; clock sits BEFORE memory because the presence adapter
+// below reads the current game hour) and all created BEFORE the tick source
+// starts so the clock and travel engines catch every CLOCK_TICK. The clock
+// owns game-time derivation; the travel engine owns the player's position and
+// the timed travel/explore activities; the tick source below only dispatches
+// ticks.
 const map = createWorldMapEngine(world);
 const poi = createPoiEngine(world);
 const clock = createWorldClockEngine(world);
+
+// Memory fan-out demo. The full generator isn't running in this hand-authored
+// scene, so a tiny presence stub stands in for npcGeneratorEngine.rosterIdsAt:
+// it says Mira and Sable share one node (DEMO_SCENE_NODE). The roster is then
+// filtered through deriveScheduleState at the current game hour — the same
+// schedule-aware presence the full world wires — so acting on Mira lands a
+// witnessed memory on Sable only while Sable's schedule has her awake
+// (rob Mira after 22:00 and Sable, asleep, records nothing).
+const DEMO_SCENE_NODE = 'demo_scene';
+const presence = {
+  witnessesAt: (nodeId) =>
+    (nodeId === DEMO_SCENE_NODE ? [mira.id, sable.id] : []).filter(
+      (id) => deriveScheduleState(registry.get(id)?.schedule, clock.getCurrentDate().hour).available
+    ),
+};
+createMemoryEngine(world, registry, presence);
+
 const travel = createTravelEngine(world, map, poi);
 const config = world.getState().config;
 const tick = createTickSource(world, config);

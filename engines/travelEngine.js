@@ -32,7 +32,8 @@
 //   1. A DETERMINISTIC SEEDED ROLL (deriveTravelIncident — pure) commits every
 //      fact the moment travel starts: category (animal/bandit/npc/
 //      environmental/mundane/none), intensity (1–3), and resolutionMode
-//      ('auto' flavor vs 'turn' — a genuine branch point). No AI is involved;
+//      ('auto' flavor vs 'requiresRealTurn' — a genuine branch point). No AI
+//      is involved;
 //      the stakes are committed before any narration touches them.
 //   2. AI NARRATION only COLORS those fixed facts. The TRAVEL_INCIDENT is
 //      recorded IMMEDIATELY with a deterministic fallback line (so state is
@@ -45,15 +46,16 @@
 //      IS the loading indicator. Under Node (no plugin) the fallback simply
 //      stays — bland but never broken.
 //
-// 'turn' RESOLUTION — DELIBERATELY DEFERRED HOOK. resolutionMode:'turn' marks
-// an incident that SHOULD consume a real player turn (combat, negotiation),
-// but no combat/social resolution system exists yet — exactly as poiEngine
-// deferred "what does a discovered shop DO". The roll, category, and severity
-// are logged as real facts for that future system to hook into; in THIS pass a
-// 'turn' incident resolves as outcome:'auto-passthrough' (fought off /
-// talked past — clearly distinct from 'none' and from 'auto' flavor) so
-// travel never hard-blocks on a system that does not exist. Swapping
-// 'auto-passthrough' for a real turn is that future system's entry point.
+// 'requiresRealTurn' RESOLUTION — DELIBERATELY DEFERRED HOOK.
+// resolutionMode:'requiresRealTurn' marks an incident that SHOULD consume a
+// real player turn (combat, negotiation), but no combat/social resolution
+// system exists yet — exactly as poiEngine deferred "what does a discovered
+// shop DO". The roll, category, and severity are logged as real facts for
+// that future system to hook into; in THIS pass a 'requiresRealTurn' incident
+// resolves as outcome:'auto-passthrough' (fought off / talked past — clearly
+// distinct from 'none' and from 'auto' flavor) so travel never hard-blocks on
+// a system that does not exist. Swapping 'auto-passthrough' for a real turn
+// is that future system's entry point.
 // Rest/making-camp is likewise its own future event type, not built here.
 
 import { mulberry32 } from '../worldState.js';
@@ -228,9 +230,9 @@ export function deriveTravelIncidents(log) {
 // outcome and a config retune can never shift later draws.
 //
 // resolutionMode is a config LOOKUP, not a draw: intensity at or above
-// turnIntensityByCategory[category] marks the incident as 'turn' — the
-// requires-a-real-turn branch a future combat/social system hooks into (see
-// header). This pass resolves 'turn' as outcome:'auto-passthrough' with a
+// turnIntensityByCategory[category] marks the incident as 'requiresRealTurn'
+// — the branch a future combat/social system hooks into (see header). This
+// pass resolves 'requiresRealTurn' as outcome:'auto-passthrough' with a
 // fought/talked flavor.
 export function deriveTravelIncident(config, fromNode, legIndex) {
   const inc = readTravel(config).incident;
@@ -250,9 +252,9 @@ export function deriveTravelIncident(config, fromNode, legIndex) {
   const category = weightedPick(sortedWeightEntries(inc.categories), categoryDraw);
   const intensity = Number(weightedPick(sortedWeightEntries(inc.intensityWeights), intensityDraw));
   const turnAt = inc.turnIntensityByCategory[category];
-  const resolutionMode = typeof turnAt === 'number' && intensity >= turnAt ? 'turn' : 'auto';
+  const resolutionMode = typeof turnAt === 'number' && intensity >= turnAt ? 'requiresRealTurn' : 'auto';
 
-  if (resolutionMode === 'turn') {
+  if (resolutionMode === 'requiresRealTurn') {
     return {
       category,
       intensity,
