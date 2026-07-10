@@ -19,13 +19,18 @@ import { log } from '../debugLog.js';
  * @param {Array} [eventLog] - the world event log, used to derive the NPC's
  *   transient per-turn emotion (deriveEmotion looks up each memory's valence by
  *   seq). Defaults to [] -> a calm, axis-shaped baseline read.
+ * @param {Array<{seq: number, speakerId: string, text: string}>} [conversationHistory] -
+ *   the bounded recent window of this pair's DIALOGUE_LINE history (see
+ *   entities/conversationHistoryStore.js's getRecentHistory), oldest first.
+ *   Caller-selected; no windowing logic lives here. Defaults to [] -> no
+ *   conversation-history section is rendered.
  * @returns {Promise<{source: 'ai'|'fallback', response: import('./responseContract.js').DialogueResponse}>}
  */
-export async function getDialogue(entity, relationship, recentMemories, playerInput, eventLog = []) {
+export async function getDialogue(entity, relationship, recentMemories, playerInput, eventLog = [], conversationHistory = []) {
   // Emotion is derived fresh here (never stored) and passed into the pure prompt
   // builder as its own transient section, distinct from the permanent voice.
   const emotion = deriveEmotion(entity, recentMemories, eventLog);
-  const prompt = buildDialoguePrompt(entity, relationship, recentMemories, playerInput, emotion);
+  const prompt = buildDialoguePrompt(entity, relationship, recentMemories, playerInput, emotion, conversationHistory);
   const attempt = await generateDialogue(prompt);
 
   if (attempt.ok) {

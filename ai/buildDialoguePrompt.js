@@ -23,9 +23,14 @@ import { relationshipTier } from '../entities/relationshipStore.js';
  *   the TRANSIENT per-turn emotional read (entities/deriveEmotion.js), computed
  *   by the caller and passed in so this function stays pure. Defaults to no
  *   read -> a calm baseline line.
+ * @param {Array<{seq: number, speakerId: string, text: string}>} [conversationHistory] -
+ *   the bounded recent window of this pair's verbatim dialogue history
+ *   (entities/conversationHistoryStore.js's getRecentHistory), oldest first.
+ *   No windowing/selection logic lives here. Defaults to [] -> no
+ *   conversation-history section rendered.
  * @returns {string} one flat instruction string
  */
-export function buildDialoguePrompt(entity, relationship, recentMemories, playerInput, emotion = { reads: [] }) {
+export function buildDialoguePrompt(entity, relationship, recentMemories, playerInput, emotion = { reads: [] }, conversationHistory = []) {
   const identity = entity.identity;
   const psychology = entity.psychology;
   const lines = [];
@@ -114,6 +119,19 @@ export function buildDialoguePrompt(entity, relationship, recentMemories, player
   lines.push('== Recent memories ==');
   for (const memory of recentMemories) {
     lines.push(`- ${memory.summary}`);
+  }
+  lines.push('');
+
+  // Conversation so far — the bounded recent window of this pair's actual
+  // prior turns (entities/conversationHistoryStore.js), verbatim, not a
+  // summary. Kept STRICTLY separate from "Recent memories" above: memories are
+  // compressed, event-triggered facts the NPC recalls; this is exactly what
+  // was said, in order, immediately before the player's current line. Placed
+  // right before that line since it's the context for interpreting it.
+  lines.push('== Conversation so far ==');
+  for (const turn of conversationHistory) {
+    const label = turn.speakerId === entity.id ? identity.firstName : (relationship.fromCallsTo || 'The player');
+    lines.push(`${label}: ${turn.text}`);
   }
   lines.push('');
 

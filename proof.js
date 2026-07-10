@@ -20,6 +20,12 @@ import {
   deriveRelationshipHistory,
   TIER_THRESHOLDS,
 } from './entities/relationshipStore.js';
+import {
+  createConversationHistoryStore,
+  deriveConversationHistory,
+  getRecentHistory,
+  RECENT_EXCHANGES_WINDOW,
+} from './entities/conversationHistoryStore.js';
 import { validateDialogueResponse } from './ai/responseContract.js';
 import { buildDialoguePrompt } from './ai/buildDialoguePrompt.js';
 import { fallbackDialogue } from './ai/fallbackDialogue.js';
@@ -2555,6 +2561,102 @@ console.log(`EM-final PASSED: Section EM produced identical output across two fu
 console.log('\nSection V+EM PASSED: voice directives are permanent, axis-derived, and coherent by construction; emotion is a transient per-turn read that is reproducible from history yet stored nowhere');
 
 // =============================================================================
+// Section CH: conversation history — verbatim DIALOGUE_LINE turns, keyed by
+// the UNORDERED pair of participants (not by a single entity id). Distinct
+// from Section EM's memory/emotion machinery: this is an exact transcript,
+// never compressed or summarized. Self-contained on its own throwaway world,
+// same convention as Section G.
+// =============================================================================
+console.log('\n=== Section CH: conversation history (pair-keyed, log-derived, bounded-window) ===');
+
+const chWorld = initWorldState(CONFIG_PATH);
+const ch = createConversationHistoryStore(chWorld);
+
+// --- CH1: canonical pair-key correctness (THE crux of this design) ---------
+// Recording via (a, b) and later via (b, a) must land in the SAME thread —
+// a conversation is one shared history regardless of argument order, unlike
+// relationship stats which are legitimately asymmetric per direction.
+ch.recordDialogueLine('ch1_a', 'ch1_b', 'ch1_a', 'Hello there.');
+ch.recordDialogueLine('ch1_b', 'ch1_a', 'ch1_b', 'Well met.');
+const ch1Forward = ch.getConversationHistory('ch1_a', 'ch1_b');
+const ch1Reversed = ch.getConversationHistory('ch1_b', 'ch1_a');
+assert.deepEqual(ch1Reversed, ch1Forward, 'getConversationHistory must be order-independent on its two id arguments');
+assert.equal(ch1Forward.length, 2, 'both lines, recorded with swapped argument order, must land in one thread');
+assert.deepEqual(ch1Forward.map((l) => l.text), ['Hello there.', 'Well met.'], 'lines must stay in dispatch order');
+console.log(`CH1 PASSED: recordDialogueLine(a,b) and (b,a) land in the same canonical thread — ${ch1Forward.length} lines, order-independent`);
+
+// --- CH2: thread isolation — one NPC's separate pairs never bleed together --
+ch.recordDialogueLine('ch2_mira', 'ch2_rowan', 'ch2_rowan', "You two go way back?");
+ch.recordDialogueLine('ch2_mira', 'ch2_rowan', 'ch2_mira', "Longer than I'd like to admit.");
+ch.recordDialogueLine('ch2_mira', 'ch2_sable', 'ch2_sable', 'Rough night at the tables?');
+const ch2WithRowan = ch.getConversationHistory('ch2_mira', 'ch2_rowan');
+const ch2WithSable = ch.getConversationHistory('ch2_mira', 'ch2_sable');
+assert.equal(ch2WithRowan.length, 2, "Mira's thread with Rowan must hold only Rowan's exchange");
+assert.equal(ch2WithSable.length, 1, "Mira's thread with Sable must hold only Sable's line");
+assert.ok(!ch2WithSable.some((l) => l.text.includes('go way back')), "Sable's thread must not see Rowan's line");
+console.log('CH2 PASSED: the same NPC (Mira) keeps fully separate threads per partner — no cross-thread bleed');
+
+// --- CH3: determinism — replaying the same DIALOGUE_LINE sequence into a
+// fresh world reproduces a byte-identical derived history.
+const ch3Log = chWorld.getEventLog();
+const ch3DerivedOnce = deriveConversationHistory(ch3Log, 'ch2_mira', 'ch2_rowan');
+const ch3DerivedTwice = deriveConversationHistory(ch3Log, 'ch2_mira', 'ch2_rowan');
+assert.deepEqual(ch3DerivedOnce, ch3DerivedTwice, 'deriving twice from the same log must be byte-identical');
+const ch3FreshWorld = initWorldState(CONFIG_PATH);
+const ch3FreshStore = createConversationHistoryStore(ch3FreshWorld);
+ch3FreshStore.recordDialogueLine('ch3_a', 'ch3_b', 'ch3_a', 'One.');
+ch3FreshStore.recordDialogueLine('ch3_a', 'ch3_b', 'ch3_b', 'Two.');
+const ch3OtherFreshWorld = initWorldState(CONFIG_PATH);
+const ch3OtherFreshStore = createConversationHistoryStore(ch3OtherFreshWorld);
+ch3OtherFreshStore.recordDialogueLine('ch3_a', 'ch3_b', 'ch3_a', 'One.');
+ch3OtherFreshStore.recordDialogueLine('ch3_a', 'ch3_b', 'ch3_b', 'Two.');
+assert.deepEqual(
+  ch3OtherFreshStore.getConversationHistory('ch3_a', 'ch3_b'),
+  ch3FreshStore.getConversationHistory('ch3_a', 'ch3_b'),
+  'the same dispatched sequence on two independent worlds must produce an identical history'
+);
+console.log('CH3 PASSED: conversation history is fully deterministic — same dispatches, same derived result, every time');
+
+// --- CH4: bounded-window correctness — older turns excluded once past N ----
+const ch4World = initWorldState(CONFIG_PATH);
+const ch4Store = createConversationHistoryStore(ch4World);
+const ch4Exchanges = RECENT_EXCHANGES_WINDOW + 3; // deliberately over the window
+for (let i = 0; i < ch4Exchanges; i++) {
+  ch4Store.recordDialogueLine('ch4_npc', 'ch4_player', 'ch4_player', `player line ${i}`);
+  ch4Store.recordDialogueLine('ch4_npc', 'ch4_player', 'ch4_npc', `npc line ${i}`);
+}
+const ch4Full = ch4Store.getConversationHistory('ch4_npc', 'ch4_player');
+assert.equal(ch4Full.length, ch4Exchanges * 2, 'the full history must hold every dispatched line, unwindowed');
+const ch4Recent = getRecentHistory(ch4Full);
+assert.equal(ch4Recent.length, RECENT_EXCHANGES_WINDOW * 2, `the windowed read must hold exactly ${RECENT_EXCHANGES_WINDOW} exchanges (${RECENT_EXCHANGES_WINDOW * 2} lines)`);
+assert.deepEqual(ch4Recent, ch4Full.slice(-(RECENT_EXCHANGES_WINDOW * 2)), 'the window must be exactly the tail of the full history');
+assert.ok(!ch4Recent.some((l) => l.text === 'player line 0'), 'the oldest exchange must be excluded once past the window');
+console.log(`CH4 PASSED: ${ch4Exchanges} exchanges recorded, windowed read trims to the most recent ${RECENT_EXCHANGES_WINDOW} (oldest excluded), full history keeps all ${ch4Full.length} lines`);
+
+// --- CH5: rebuildability — rebuild-from-log-only equals the live cache -----
+const ch5Rebuilt = ch4Store.rebuildConversationHistory('ch4_npc', 'ch4_player');
+assert.deepEqual(ch5Rebuilt, ch4Full, 'history rebuilt from the log alone must equal the incrementally-cached history');
+console.log(`CH5 PASSED: rebuilt-from-log (${ch5Rebuilt.length} lines) == live cache (${ch4Full.length} lines)`);
+
+// --- CH6: prompt integration — buildDialoguePrompt renders the windowed
+// history with correctly-resolved speaker labels, deterministically.
+const chNpc = { id: 'ch6_npc', identity: { firstName: 'Mira', lastName: 'Thistledown' }, psychology: mira.psychology };
+const chEdge = { fromCallsTo: 'traveler', stats: relationships.getRelationship(mira.id, rowan.id).stats };
+const chHistory = [
+  { seq: 0, speakerId: 'ch6_player', text: 'You two go way back?' },
+  { seq: 1, speakerId: 'ch6_npc', text: "Longer than I'd like to admit." },
+];
+const chPromptOnce = buildDialoguePrompt(chNpc, chEdge, [], 'Anything else I should know?', { reads: [] }, chHistory);
+const chPromptTwice = buildDialoguePrompt(chNpc, chEdge, [], 'Anything else I should know?', { reads: [] }, chHistory);
+assert.equal(chPromptOnce, chPromptTwice, 'the prompt must render byte-identically across repeated calls with identical inputs');
+assert.ok(chPromptOnce.includes('== Conversation so far =='), 'the prompt must include the conversation-history section header');
+assert.ok(chPromptOnce.includes('traveler: You two go way back?'), "the player's line must be labeled with the NPC's fromCallsTo address");
+assert.ok(chPromptOnce.includes("Mira: Longer than I'd like to admit."), "the NPC's own line must be labeled with its firstName");
+console.log('CH6 PASSED: buildDialoguePrompt renders the conversation-history section deterministically with correctly-resolved speaker labels');
+
+console.log('\nSection CH PASSED: dialogue history is pair-keyed (order-independent), thread-isolated per partner, deterministic, bounded-window correct, rebuildable, and wired into the dialogue prompt');
+
+// =============================================================================
 // Section SL: save/load — round-tripping the ENTIRE world state.
 //
 // The architecture's core promise, put on trial end to end: raw state is
@@ -2616,7 +2718,7 @@ function slWireEngines(fan) {
 // so the returned world is fully settled (no in-flight async work).
 async function slBuildLivedInWorld() {
   const fan = buildSampleWorld();
-  const { world, registry, relationships, races, mira, rowan, sable } = fan;
+  const { world, registry, relationships, conversationHistory, races, mira, rowan, sable } = fan;
   const engines = slWireEngines(fan);
   const { map, poi, faction, npcGen } = engines;
 
@@ -2689,6 +2791,17 @@ async function slBuildLivedInWorld() {
   world.dispatch('DEBUG_SET_TIME_CONTEXT', { timeContext: 'chatting' });
   world.dispatch('CLOCK_TICK', { realSecondsElapsed: 10 });
   world.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 3600 });
+
+  // Conversation history: more than RECENT_EXCHANGES_WINDOW exchanges on the
+  // Mira<->Rowan pair (proves the bounded window still trims correctly after
+  // a round-trip), plus a line on a DIFFERENT pair (Mira<->Sable) to prove
+  // save/load preserves thread isolation, not just single-thread content.
+  const slExchangeCount = RECENT_EXCHANGES_WINDOW + 2;
+  for (let i = 0; i < slExchangeCount; i++) {
+    conversationHistory.recordDialogueLine(mira.id, rowan.id, rowan.id, `Rowan says ${i}.`);
+    conversationHistory.recordDialogueLine(mira.id, rowan.id, mira.id, `Mira replies ${i}.`);
+  }
+  conversationHistory.recordDialogueLine(mira.id, sable.id, sable.id, 'Rough night at the tables?');
 
   return { ...fan, ...engines, village, hamlet, victim, exploredNodeIds };
 }
@@ -2865,13 +2978,35 @@ const slNoDriftLines = captureConsole(() => {
 assert.equal(slNoDriftLines.filter((l) => l.includes('SaveLoad')).length, 0, 'a save with no config drift must not warn');
 console.log("SL13 PASSED: config drift between a save and the shipped config is detected and loudly warned about, but never blocks loading and never silently swaps in the shipped values");
 
+// --- SL14: conversation history — pair-keyed, round-trips exactly, and the
+// loaded store's primed cache equals its own from-scratch rebuild. Distinct
+// threads for the same NPC (Mira<->Rowan vs Mira<->Sable) must both round-trip
+// and stay isolated from each other, not just individually correct.
+const slMiraRowanA = slA.conversationHistory.getConversationHistory(slA.mira.id, slA.rowan.id);
+const slMiraRowanL = slL.conversationHistory.getConversationHistory(slA.mira.id, slA.rowan.id);
+assert.deepEqual(slMiraRowanL, slMiraRowanA, "Mira<->Rowan's conversation history must round-trip exactly");
+assert.equal(slMiraRowanA.length, (RECENT_EXCHANGES_WINDOW + 2) * 2, 'the fixture recorded more than the window — full history must carry every line');
+
+const slMiraSableA = slA.conversationHistory.getConversationHistory(slA.mira.id, slA.sable.id);
+const slMiraSableL = slL.conversationHistory.getConversationHistory(slA.mira.id, slA.sable.id);
+assert.deepEqual(slMiraSableL, slMiraSableA, "Mira<->Sable's conversation history must round-trip exactly");
+assert.notDeepEqual(slMiraSableL, slMiraRowanL, "Mira's two separate threads must stay distinct after round-tripping, not merge");
+
+assert.deepEqual(
+  slL.conversationHistory.rebuildConversationHistory(slA.mira.id, slA.rowan.id),
+  slMiraRowanL,
+  'loaded conversation-history cache must equal its own from-scratch rebuild'
+);
+console.log(`SL14 PASSED: conversation history round-trips pair-keyed and thread-isolated — Mira<->Rowan ${slMiraRowanA.length} lines, Mira<->Sable ${slMiraSableA.length} line(s), loaded cache equals its own rebuild`);
+
 console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read matches the original exactly');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
 // transport plumbing, fallback + contract enforcement, memory fan-out, the
-// permanent-voice / transient-emotion derivations, and the full save/load
-// round-trip of the entire world state. Real live-AI verification
+// permanent-voice / transient-emotion derivations, pair-keyed conversation
+// history, and the full save/load round-trip of the entire world state.
+// Real live-AI verification
 // (dialogue lines AND memory-summary lines) can only happen by hand inside an
 // actual Perchance page.
 console.log('\nALL CHECKS PASSED');
