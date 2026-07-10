@@ -39,8 +39,9 @@
 // Exploring costs game-time by plugging into WorldClockEngine as a new timeContext
 // ('exploring'): every explore action carries timeContext:'exploring' in its
 // payload, which WorldClockEngine already picks up (last-write-wins) with zero
-// engine changes — exactly how ACTION_TRAVEL_STARTED / DEBUG_SET_TIME_CONTEXT set
-// 'traveling'. The only clock-side change is the config multiplier for it.
+// engine changes — exactly how travelEngine's ACTION_TRAVEL_STARTED sets
+// 'traveling'. travelEngine's explore window is what ends the context (its
+// ACTION_EXPLORE_ENDED carries 'idle' after the configured duration).
 
 import { mulberry32 } from '../worldState.js';
 import { hashCoords, mapSeed, tierRank } from './worldMapEngine.js';
@@ -413,10 +414,11 @@ export function createPoiEngine(world) {
     return poi;
   }
 
-  // grantRevealAuthority — grant reveal authority for a specific POI id. The
-  // quest/inventory/spell stand-in (analogue of DEBUG_SET_TIME_CONTEXT standing in
-  // for real travel verbs): it only dispatches; the subscribe handler updates the
-  // cache. Log-derived, so authority is rebuildable like everything else.
+  // grantRevealAuthority — grant reveal authority for a specific POI id. A
+  // quest/inventory/spell stand-in (the same stand-in discipline the debug
+  // time-context switch followed until travelEngine's real verbs retired it):
+  // it only dispatches; the subscribe handler updates the cache. Log-derived,
+  // so authority is rebuildable like everything else.
   function grantRevealAuthority(poiId) {
     return world.dispatch(POI_REVEAL_GRANTED, { poiId });
   }

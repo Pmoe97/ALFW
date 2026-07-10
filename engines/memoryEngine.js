@@ -12,9 +12,10 @@
 //   STAND-IN for real presence/schedule tracking, which ALFW does not have yet
 //   (NPC schedules / location-by-time-of-day are still unchecked on the
 //   tracker). It leans on the only location signal that exists — the node an
-//   NPC was generated at (npcGeneratorEngine.rosterIdsAt) — exactly the way
-//   DEBUG_SET_TIME_CONTEXT stands in for real travel verbs. Swap it for a real
-//   "who is physically here now" query when schedules land.
+//   NPC was generated at (npcGeneratorEngine.rosterIdsAt) — the same stand-in
+//   discipline the debug time-context switch followed until travelEngine's
+//   real verbs retired it. Swap it for a real "who is physically here now"
+//   query when schedules land.
 //
 //   WHY the resolution is COMMITTED rather than re-derived: `presence` is an
 //   injected collaborator (a stub in the harness, rosterIdsAt in a full

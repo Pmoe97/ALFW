@@ -28,8 +28,8 @@
 <style>
   /* Presentation-only: readability for a debug harness, not a product screen.
      Dark bg / light text so this is legible during long test sessions. Each
-     panel gets its own accent color so "player action" vs "debug-only time
-     control" is distinguishable at a glance, not just by reading the text.
+     panel gets its own accent color so the different verb groups are
+     distinguishable at a glance, not just by reading the text.
      Lives in <body> (not <head>) so it survives the PERCHANCE-BUNDLE splice —
      <style> is valid anywhere in body content, and this whole marked block
      gets lifted as-is into the Perchance bundle by scripts/build.js. */
@@ -40,7 +40,7 @@
     --muted: #9aa0a6;
     --border: #2c2c33;
     --accent-clock: #4a90d9;
-    --accent-debug: #d9a441;
+    --accent-travel: #d9a441;
     --accent-actions: #4ac97a;
     --accent-relationship: #b083f0;
     --accent-dialogue: #e85f5c;
@@ -67,7 +67,7 @@
   .panel h2 { margin-top: 0; margin-bottom: 0.5rem; font-size: 1.05rem; display: flex; align-items: center; gap: 0.5rem; }
   .panel p, .panel small { color: var(--muted); }
   .panel-clock { border-left-color: var(--accent-clock); }
-  .panel-debug { border-left-color: var(--accent-debug); }
+  .panel-travel { border-left-color: var(--accent-travel); }
   .panel-actions { border-left-color: var(--accent-actions); }
   .panel-relationship { border-left-color: var(--accent-relationship); }
   .panel-dialogue { border-left-color: var(--accent-dialogue); }
@@ -79,7 +79,7 @@
     padding: 0.15rem 0.45rem;
     border-radius: 999px;
   }
-  .badge-debug { background: rgba(217, 164, 65, 0.18); color: var(--accent-debug); border: 1px solid rgba(217, 164, 65, 0.4); }
+  .badge-travel { background: rgba(217, 164, 65, 0.18); color: var(--accent-travel); border: 1px solid rgba(217, 164, 65, 0.4); }
   .badge-actions { background: rgba(74, 201, 122, 0.18); color: var(--accent-actions); border: 1px solid rgba(74, 201, 122, 0.4); }
   button {
     background: #2a2a30;
@@ -117,17 +117,16 @@
   <pre id="clock">(starting…)</pre>
 </div>
 
-<div class="panel panel-debug">
-  <h2>Debug time controls <span class="badge badge-debug">Debug only</span></h2>
-  <p>
-    Not a gameplay verb — dispatches a bare <code>timeContext</code> so the
-    tick source + dilation can be proven live before real travel/dialogue
-    verbs exist. Multipliers: idle &times;20, traveling &times;60, chatting &times;1.
-  </p>
-  <button id="btn-ctx-idle">idle</button>
-  <button id="btn-ctx-traveling">traveling</button>
-  <button id="btn-ctx-chatting">chatting</button>
-  <p><small>Backgrounding this tab pauses the clock (pause-on-blur). Also callable via <code>debugSetContext('traveling')</code> in the console.</small></p>
+<div class="panel panel-travel">
+  <h2>Travel &amp; explore <span class="badge badge-travel">Player verbs</span></h2>
+  <pre id="location">(locating…)</pre>
+  <div id="travel-status"></div>
+  <div id="travel-buttons"></div>
+  <p style="margin-bottom: 0.25rem;"><button id="btn-explore">Explore here</button></p>
+  <div id="poi-list"></div>
+  <p><small>Travel and exploring dilate the clock above (traveling &times;60,
+  exploring &times;40); talking runs at &times;1. Backgrounding this tab pauses the
+  clock (pause-on-blur).</small></p>
 </div>
 
 <div class="panel panel-actions">

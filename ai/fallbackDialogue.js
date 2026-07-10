@@ -42,8 +42,11 @@ const GENERIC_RESPONSE = Object.freeze({
   toneTags: Object.freeze(['neutral']),
 });
 
-// djb2 — tiny pure string hash for deterministic line selection.
-function hashString(str) {
+// djb2 — tiny pure string hash for deterministic line selection. Exported for
+// the other deterministic fallbacks (fallbackTravelNarration) — pure-helper
+// sharing, so no module ever mints a second string hash or touches kernel RNG
+// to pick a canned line.
+export function hashString(str) {
   let hash = 5381;
   for (let i = 0; i < str.length; i++) {
     hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0;

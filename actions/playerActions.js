@@ -32,3 +32,24 @@ export function robNpc(world, actorId, targetId, nodeId) {
 export function ignoreNpc(world, actorId, targetId, nodeId) {
   return world.dispatch('PLAYER_IGNORED', interactionPayload(actorId, targetId, nodeId));
 }
+
+// startDialogue/endDialogue — the real dialogue time-cost verbs. Bracketing a
+// conversation dispatches timeContext:'chatting' going in and 'idle' coming
+// out, so the real seconds spent inside (including AI latency) dilate at the
+// chatting multiplier — WorldClockEngine picks the context off any action's
+// payload with zero engine changes. DIALOGUE_LINE itself stays time-inert.
+// Call endDialogue in a `finally`: the context must never be left stuck on
+// 'chatting' because a dialogue call failed.
+export function startDialogue(world, actorId, targetId) {
+  return world.dispatch('ACTION_DIALOGUE_STARTED', {
+    ...interactionPayload(actorId, targetId),
+    timeContext: 'chatting',
+  });
+}
+
+export function endDialogue(world, actorId, targetId) {
+  return world.dispatch('ACTION_DIALOGUE_ENDED', {
+    ...interactionPayload(actorId, targetId),
+    timeContext: 'idle',
+  });
+}
