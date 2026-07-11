@@ -98,7 +98,7 @@
  * @typedef {'athletics'|'acrobatics'|'sleightOfHand'|'stealth'|'fortitude'|
  *   'willpower'|'deception'|'intimidation'|'performance'|'persuasion'|
  *   'magic'|'investigation'|'religion'|'history'|'perception'|'survival'|
- *   'medicine'} PrimarySkill
+ *   'medicine'|'smithing'|'alchemy'|'enchanting'} PrimarySkill
  */
 
 /**
@@ -172,6 +172,13 @@ export const PRIMARY_SKILL_ATTRIBUTE = {
   perception: 'insight',
   survival: 'insight',
   medicine: 'insight',
+  // Crafting skills (economy engine). Appended at the END of the roster:
+  // the NPC generator draws one value per key in Object.keys order, so
+  // appending shifts only the draws AFTER the primary block — an intentional
+  // reroll of future generated NPCs (committed rosters are log snapshots).
+  smithing: 'strength',
+  alchemy: 'intelligence',
+  enchanting: 'insight',
 };
 
 // Runtime rosters for the secondary skills and attributes documented in the

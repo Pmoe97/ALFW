@@ -141,6 +141,18 @@ const WORLD_CONFIG = {
       turnIntensityByCategory: { animal: 3, bandit: 2, npc: 3, environmental: 3, mundane: 4 },
     },
   },
+  // Economy TUNING only (engines/economyEngine.js): the price spread and
+  // seeded-shop stock sizing. Item definitions/recipes are shipped CODE
+  // (engines/economyData.js) so the catalog never bloats saves or trips the
+  // config-drift warning on content additions.
+  economy: {
+    spread: { shopSellsFactor: 1.3, shopBuysFactor: 0.7 },
+    shop: {
+      stockSizeByTier: { hamlet: 4, village: 6, town: 8, city: 10, capital: 12 },
+      baseGoldByTier: { hamlet: 80, village: 150, town: 300, city: 600, capital: 1000 },
+      maxStackQty: 5,
+    },
+  },
   // Top-level SIBLING of worldMap on purpose: worldMap.* is seed-locked
   // generation config; raceRegistry is the DEFAULTS of a live, player-editable
   // settings surface (see entities/raceRegistry.js).
@@ -395,6 +407,7 @@ export function buildSampleWorld({ save } = {}) {
           willpower: 6, deception: 4, intimidation: 3, performance: 5, persuasion: 6,
           magic: 0, investigation: 2, religion: 3, history: 4, perception: 5,
           survival: 3, medicine: 2,
+          smithing: 1, alchemy: 3, enchanting: 0,
         },
         secondary: {
           riding: 1, dancing: 2, swimming: 1, cleaning: 6, disguise: 1,
@@ -463,6 +476,7 @@ export function buildSampleWorld({ save } = {}) {
           willpower: 3, deception: 2, intimidation: 2, performance: 1, persuasion: 2,
           magic: 0, investigation: 4, religion: 1, history: 2, perception: 5,
           survival: 6, medicine: 2,
+          smithing: 2, alchemy: 1, enchanting: 0,
         },
         secondary: {
           riding: 5, dancing: 1, swimming: 3, cleaning: 2, disguise: 2,
@@ -533,6 +547,7 @@ export function buildSampleWorld({ save } = {}) {
           willpower: 5, deception: 8, intimidation: 3, performance: 6, persuasion: 7,
           magic: 0, investigation: 3, religion: 1, history: 2, perception: 6,
           survival: 1, medicine: 1,
+          smithing: 0, alchemy: 1, enchanting: 1,
         },
         secondary: {
           riding: 1, dancing: 3, swimming: 1, cleaning: 2, disguise: 3,
@@ -586,6 +601,33 @@ export function buildSampleWorld({ save } = {}) {
   // not a bug: the two of them experienced the same history very differently.
   seedEdge(mira.id, sable.id, { affection: 60, comfort: 24, trust: -40, desire: 0, obedience: 0 }, 'Sable');
   seedEdge(sable.id, mira.id, { affection: 60, comfort: 20, trust: -10, desire: 0, obedience: 0 }, 'Mira');
+
+  // Rowan's starting purse and pack (engines/economyEngine.js derives all
+  // holdings from these events). Same save/load idiom as the seedEdge stat
+  // dispatches: seeds are raw dispatches on a FRESH world only — a loaded
+  // save already carries them in its log, and the economy engine (wired by
+  // callers) primes from the log it finds. Materials are chosen so the
+  // bs_smelt/bs1/al1/al2/en1 recipes are immediately craftable while bs2/en2
+  // sit above Rowan's effective skills (live skill-gate demo). The instance
+  // ids embed the entry's own seq (read immediately before the dispatch —
+  // dispatch is synchronous, so nothing can interleave).
+  if (!save) {
+    world.dispatch('GOLD_GRANTED', { entityId: rowan.id, amount: 150, reason: 'seed' });
+    const nextSeq = world.getEventLog().length;
+    world.dispatch('ITEMS_GRANTED', {
+      entityId: rowan.id,
+      reason: 'seed',
+      stacks: {
+        iron_ore: 4, iron_ingot: 2, leather_strip: 2, silverleaf_herb: 3,
+        spring_water: 2, glass_vial: 1, arcane_dust: 2, bread: 2,
+      },
+      instances: [
+        { instanceId: `itm_${nextSeq}_0`, itemDefId: 'iron_dagger', properties: {} },
+        { instanceId: `itm_${nextSeq}_1`, itemDefId: 'leather_jerkin', properties: {} },
+        { instanceId: `itm_${nextSeq}_2`, itemDefId: 'copper_ring', properties: {} },
+      ],
+    });
+  }
 
   return { world, registry, relationships, conversationHistory, races, mira, rowan, sable };
 }

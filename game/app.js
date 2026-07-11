@@ -18,6 +18,7 @@ import { createWorldClockEngine } from '../engines/worldClockEngine.js';
 import { createFactionEngine } from '../engines/factionEngine.js';
 import { createNpcGeneratorEngine, deriveScheduleState } from '../engines/npcGeneratorEngine.js';
 import { createTravelEngine } from '../engines/travelEngine.js';
+import { createEconomyEngine } from '../engines/economyEngine.js';
 import { createTickSource } from './tickSource.js';
 import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from '../actions/playerActions.js';
 import { getDialogue } from '../ai/getDialogue.js';
@@ -45,6 +46,7 @@ const presence = {
 createMemoryEngine(world, registry, presence);
 
 const travel = createTravelEngine(world, map, poi);
+const economy = createEconomyEngine(world, registry);
 const config = world.getState().config;
 const tick = createTickSource(world, config);
 
@@ -67,14 +69,32 @@ function materializedNodeIds() {
 }
 
 // --- UI context -------------------------------------------------------------
+// The Trading screen trades with Sable's authored shop (the Rusted Ledger),
+// the one vendor guaranteed to exist in the demo world without hunting the
+// generated map for a shop POI.
+const merchantShopRef = { kind: 'authored', shopId: 'shop_rusted_ledger' };
+
 const ctx = {
   world,
   config,
   player: rowan,
   npc: mira,
   merchant: sable,
-  engines: { map, poi, clock, faction, npcGen, travel, relationships, conversationHistory, races, registry },
-  actions: { startDialogue, endDialogue, helpNpc, robNpc, ignoreNpc },
+  merchantShopRef,
+  engines: { map, poi, clock, faction, npcGen, travel, relationships, conversationHistory, races, registry, economy },
+  actions: {
+    startDialogue,
+    endDialogue,
+    helpNpc,
+    robNpc,
+    ignoreNpc,
+    // Economy verbs — thin arrows over the engine's react methods (resolve
+    // live, commit ONE atomic outcome event or nothing). All act as Rowan.
+    equipItem: (slot, instanceId) => economy.equip(rowan.id, slot, instanceId),
+    dropItem: (items) => economy.drop(rowan.id, items),
+    confirmTrade: (offer) => economy.trade(rowan.id, merchantShopRef, offer),
+    craftRecipe: (stationId, recipeId) => economy.craft(rowan.id, stationId, recipeId),
+  },
   getDialogue,
   knownNpcIds: [mira.id, sable.id],
   materializedNodeIds,

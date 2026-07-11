@@ -1,7 +1,8 @@
-// game/ui/screens/inventory.js — Inventory, Desktop + Mobile. There is no item or
-// equipment engine (player.inventory is a real but empty array), so every data
-// region here is hazard-marked unwired. The category rail and desktop/mobile
-// layout are UI-only scaffolding; no item content is fabricated to look real.
+// game/ui/screens/inventory.js — Inventory, Desktop + Mobile, wired to the
+// economy engine: the item table, detail pane, Drop/Equip/Unequip, and the
+// equip mannequin all read real holdings/equipment. Examine and Favorite stay
+// hazard-marked unwired (no examine-text or favorites backing exists); the
+// item image keeps the NEUTRAL "no image yet" placeholder.
 
 import { div, span, el, button } from '../dom.js';
 import { buildInventory, INVENTORY_CATEGORIES } from '../model.js';
@@ -12,9 +13,9 @@ import {
 import { iconSpan } from '../icons.js';
 
 const SLOTS = [
-  { label: 'Head', x: 50, y: 9 }, { label: 'Necklace', x: 90, y: 22 }, { label: 'Chest', x: 50, y: 30 },
-  { label: 'Gloves', x: 10, y: 35 }, { label: 'Ring', x: 90, y: 48 }, { label: 'Main Hand', x: 10, y: 50 },
-  { label: 'Off Hand', x: 90, y: 70 }, { label: 'Legs', x: 50, y: 63 }, { label: 'Shoes', x: 50, y: 84 },
+  { id: 'head', label: 'Head', x: 50, y: 9 }, { id: 'necklace', label: 'Necklace', x: 90, y: 22 }, { id: 'chest', label: 'Chest', x: 50, y: 30 },
+  { id: 'gloves', label: 'Gloves', x: 10, y: 35 }, { id: 'ring', label: 'Ring', x: 90, y: 48 }, { id: 'mainHand', label: 'Main Hand', x: 10, y: 50 },
+  { id: 'offHand', label: 'Off Hand', x: 90, y: 70 }, { id: 'legs', label: 'Legs', x: 50, y: 63 }, { id: 'shoes', label: 'Shoes', x: 50, y: 84 },
 ];
 
 export function renderInventory(ui) {
@@ -35,37 +36,76 @@ function categoryRail(ui, vertical) {
   return rail;
 }
 
-function itemTable() {
+function itemTable(ui, m) {
   const panel = div(panelStyle('overflow:hidden; display:flex; flex-direction:column;'));
   panel.appendChild(div('display:grid; grid-template-columns: 1.8fr 0.8fr 0.6fr 0.6fr 0.5fr; gap:6px; padding:8px 10px; background:var(--panel-alt); ' + sectionLabelStyle(),
     { html: '<span>Item name</span><span>Type</span><span>Weight</span><span>Value</span><span>Qty</span>' }));
-  const body = div('overflow:auto; flex:1; min-height:120px;', { unwired: true, children: [
-    div('font:400 12px Inter,sans-serif; color:var(--text-faint); padding:14px; text-align:center;',
-      { text: 'No inventory/item engine wired — this list has no backing.' }),
-  ] });
+  const body = div('overflow:auto; flex:1; min-height:120px;');
+  if (m.items.length === 0) {
+    body.appendChild(div('font:400 12px Inter,sans-serif; color:var(--text-faint); padding:14px; text-align:center;',
+      { text: 'Nothing in this category.' }));
+  }
+  for (const row of m.items) {
+    const selected = m.selected?.key === row.key;
+    body.appendChild(div(
+      `display:grid; grid-template-columns: 1.8fr 0.8fr 0.6fr 0.6fr 0.5fr; gap:6px; padding:7px 10px; cursor:pointer; align-items:baseline; ` +
+      `border-left:2px solid ${selected ? 'var(--accent)' : 'transparent'}; background:${selected ? 'var(--panel-alt)' : 'transparent'};`,
+      {
+        onClick: () => ui.setState({ selectedItemId: row.key }),
+        children: [
+          span("font:600 12px 'Barlow Semi Condensed',sans-serif; color:var(--text);", { text: row.name + (row.equipped ? ' (equipped)' : '') }),
+          span('font:400 11px Inter,sans-serif; color:var(--text-faint);', { text: row.typeLabel }),
+          span('font:400 11px Inter,sans-serif; color:var(--text-faint);', { text: String(row.weight) }),
+          span('font:500 11px Inter,sans-serif; color:var(--accent-strong);', { text: `${row.value}c` }),
+          span('font:500 11px Inter,sans-serif; color:var(--text);', { text: String(row.qty) }),
+        ],
+      }
+    ));
+  }
   panel.appendChild(body);
   return panel;
 }
 
-function detailPane() {
+function detailPane(ui, m) {
+  const item = m.selected;
+  const act = ui.ctx.actions;
+
+  const buttons = [];
+  if (item?.slot && item.instanceId) {
+    buttons.push(button(item.equipped ? 'Unequip' : 'Equip', primaryActionButtonStyle(), () => {
+      act.equipItem(item.slot, item.equipped ? null : item.instanceId);
+      ui.setState({});
+    }));
+  } else {
+    buttons.push(button('Equip', primaryActionButtonStyle(), null, { disabled: true, title: item ? 'Not equippable' : 'No item selected' }));
+  }
+  buttons.push(button('Drop', secondaryActionButtonStyle(), item && !item.equipped ? () => {
+    act.dropItem(item.instanceId ? { instanceIds: [item.instanceId] } : { stacks: { [item.defId]: item.qty } });
+    ui.setState({ selectedItemId: null });
+  } : null, { disabled: !item || item.equipped, title: item?.equipped ? 'Unequip it first' : undefined }));
+  // Examine/Favorite have no backing engine — the audit keeps them marked.
+  buttons.push(button('Examine', secondaryActionButtonStyle(), null, { disabled: true, unwired: m.examine.unwired }));
+  buttons.push(button('Favorite', secondaryActionButtonStyle(), null, { disabled: true, unwired: m.favorite.unwired }));
+
   return div(panelStyle('padding:10px; display:flex; flex-direction:column; gap:8px; overflow:auto;'), {
-    unwired: true,
     children: [
       div(placeholderStripeStyle(1.6), { text: 'ITEM IMAGE' }),
-      div("font:600 13px 'Barlow Semi Condensed',sans-serif; color:var(--text-faint);", { text: 'No item selected' }),
-      div('font:400 11.5px Inter,sans-serif; color:var(--text-faint); line-height:1.4;', { text: 'Item details are not backed by any engine.' }),
-      div('display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:auto;', { children: [
-        button('Equip', primaryActionButtonStyle(), null, { disabled: true }),
-        button('Drop', secondaryActionButtonStyle(), null, { disabled: true }),
-        button('Examine', secondaryActionButtonStyle(), null, { disabled: true }),
-        button('Favorite', secondaryActionButtonStyle(), null, { disabled: true }),
-      ] }),
+      div("font:600 13px 'Barlow Semi Condensed',sans-serif; color:var(--text);", { text: item ? item.name : 'No item selected' }),
+      item
+        ? div('font:400 11.5px Inter,sans-serif; color:var(--text-faint); line-height:1.4;', {
+            text: `${item.typeLabel} · ${item.value}c · ${item.weight} wt` +
+              (item.qty > 1 ? ` · ×${item.qty}` : '') +
+              (item.slot ? ` · fits ${SLOTS.find((s) => s.id === item.slot)?.label ?? item.slot}` : '') +
+              (item.equipped ? ' · currently equipped' : ''),
+          })
+        : div('font:400 11.5px Inter,sans-serif; color:var(--text-faint); line-height:1.4;', { text: 'Select an item from the list.' }),
+      div('display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:auto;', { children: buttons }),
     ],
   });
 }
 
-function equipMannequin() {
-  const panel = div(panelStyle('position:relative; min-height:380px;'), { unwired: true });
+function equipMannequin(ui, m) {
+  const panel = div(panelStyle('position:relative; min-height:380px;'));
   const svg = el('svg', 'position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:46%; height:82%;', {
     attrs: { viewBox: '0 0 100 130' },
     html:
@@ -78,31 +118,40 @@ function equipMannequin() {
   });
   panel.appendChild(svg);
   for (const s of SLOTS) {
-    panel.appendChild(div(slotChipStyle(false) + `left:${s.x}%; top:${s.y}%;`, { text: s.label }));
+    const worn = m.equippedBySlot[s.id];
+    panel.appendChild(div(slotChipStyle(Boolean(worn)) + `left:${s.x}%; top:${s.y}%;`, {
+      text: worn ? worn.name : s.label,
+      title: worn ? `${s.label}: ${worn.name} — click to select` : `${s.label}: empty`,
+      onClick: worn ? () => ui.setState({ selectedItemId: worn.key }) : null,
+    }));
   }
   return panel;
 }
 
 function invDesktop(ui) {
-  buildInventory(ui.ctx); // real (empty) inventory read; kept for parity/audit
+  const m = buildInventory(ui.ctx, ui.state);
   return div('display:grid; grid-template-columns: 40px minmax(260px,1fr) minmax(240px,300px) minmax(220px,260px); gap:10px; padding:10px; min-height:calc(100vh - 92px);',
-    { children: [categoryRail(ui, true), itemTable(), detailPane(), equipMannequin()] });
+    { children: [categoryRail(ui, true), itemTable(ui, m), detailPane(ui, m), equipMannequin(ui, m)] });
 }
 
 function invMobile(ui) {
-  const { state, setState } = ui;
+  const { state } = ui;
+  const m = buildInventory(ui.ctx, state);
   let body;
-  if (state.invMobileTab === 'details') body = detailPane();
+  if (state.invMobileTab === 'details') body = detailPane(ui, m);
   else if (state.invMobileTab === 'equip') {
-    body = div('display:flex; flex-direction:column; gap:6px;', { unwired: true, children: SLOTS.map((s) =>
-      div('display:flex; align-items:center; justify-content:space-between; padding:9px 10px; ' + panelStyle('border-radius:5px;'), {
+    body = div('display:flex; flex-direction:column; gap:6px;', { children: SLOTS.map((s) => {
+      const worn = m.equippedBySlot[s.id];
+      return div('display:flex; align-items:center; justify-content:space-between; padding:9px 10px; ' + panelStyle('border-radius:5px;'), {
+        onClick: worn ? () => ui.setState({ selectedItemId: worn.key, invMobileTab: 'details' }) : null,
         children: [
           span("font:600 11.5px 'Barlow Semi Condensed',sans-serif; color:var(--text);", { text: s.label }),
-          span('font:500 11px Inter,sans-serif; color:var(--text-faint);', { text: '—' }),
+          span(`font:500 11px Inter,sans-serif; color:${worn ? 'var(--text)' : 'var(--text-faint)'};`, { text: worn ? worn.name : '—' }),
         ],
-      })) });
+      });
+    }) });
   } else {
-    body = div('', { children: [categoryRail(ui, false), itemTable()] });
+    body = div('', { children: [categoryRail(ui, false), itemTable(ui, m)] });
   }
 
   const tabBar = div('display:flex; border-top:1px solid var(--border); background:var(--panel);', { children: [

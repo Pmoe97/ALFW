@@ -39,7 +39,7 @@ const INITIAL_STATE = {
   tradingView: 'desktop',
   tradingMobileTab: 'yours',
   selectedCategory: 'all',
-  selectedItemId: 1,
+  selectedItemId: null, // an inventory row key: an instanceId or a stack's defId
   journalTab: 'log',
   characterTab: 'overview',
   craftStation: 'blacksmith',
