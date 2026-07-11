@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ALFW</title>
+</head>
+<body>
+<!--
+  Dual-purpose file, exactly like game/testHarness.html:
+
+  1. Local dev: serve over a static server (not file:// — ES module imports are
+     blocked under file://), e.g. from the repo root:
+       npx serve game
+       (or) python -m http.server --directory game
+     then open the printed localhost URL + /app.html.
+
+  2. Source for the Perchance bundle: scripts/build.js's SECOND entry point is
+     game/app.js; it splices the markup between the PERCHANCE-BUNDLE markers out
+     of THIS file and appends the bundled script — producing dist/alfw-perchance-
+     app.html, one self-contained artifact to paste into Perchance's html panel.
+     The import-map + module-script at the bottom of <body> is local-dev-only and
+     is deliberately OUTSIDE the marked block (the Perchance bundle inlines
+     everything at build time instead).
+-->
+<!-- PERCHANCE-BUNDLE:BEGIN -->
+<style>
+  /* Static, theme-independent chrome only. All game colors come from CSS custom
+     properties applied at runtime by game/ui/theme.js (the three themes:
+     leather/moss/storm). Fonts match the design prototype; every inline style
+     also names a generic fallback, so the UI degrades gracefully if the web
+     fonts don't load (e.g. under a strict Perchance CSP). Lives in <body> so it
+     survives the PERCHANCE-BUNDLE splice. */
+  @import url('https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+  html, body { margin: 0; padding: 0; }
+  body { background: #0c0a08; }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+  [data-unwired] { /* marker hook: unwired elements are queryable in the DOM */ }
+</style>
+<div id="app"></div>
+<!-- PERCHANCE-BUNDLE:END -->
+
+<!--
+  Local-dev-only wiring below (NOT part of the Perchance splice): loads app.js as
+  a real ES module via a local static server. worldState.js has an unconditional
+  top-level `import { readFileSync } from 'node:fs'`; scripts/build.js resolves it
+  via an esbuild alias to nodeFsShim.js for the bundle, and this harness does the
+  browser-native equivalent with an import map — the same shim, same specifier.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "node:fs": "../scripts/nodeFsShim.js"
+  }
+}
+</script>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

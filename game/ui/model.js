@@ -1,0 +1,296 @@
+// game/ui/model.js — the adapter layer. Every screen's view-model is built here
+// from LIVE engine reads, and every field the audit found has no real backing is
+// tagged `unwired: true`. This is the single place the wired-vs-unwired audit is
+// encoded as data; screens render the flag (via dom.js:markUnwired) but never
+// decide it. Nothing here fabricates values to look functional — unwired regions
+// carry real empty/derived state or an explicit "—", never invented content.
+//
+// Engine reads used (all already exported; no engine changes):
+//   map.getNode / getOriginNode / classifyAt, poi.getPoiState / getRevealedPoiIds,
+//   clock.getCurrentDate, travel.getPlayerNodeId / getActiveActivity / getIncidents,
+//   faction.getFactionControl, relationships.getRelationship + relationshipTier,
+//   conversationHistory.getConversationHistory, deriveEmotion, effectiveSkill,
+//   deriveTimeOfDayBucket.
+
+import { relationshipTier, TIER_THRESHOLDS } from '../../entities/relationshipStore.js';
+import { deriveEmotion } from '../../entities/deriveEmotion.js';
+import { deriveTimeOfDayBucket } from '../../engines/worldClockEngine.js';
+import { effectiveSkill, PRIMARY_SKILL_ATTRIBUTE, ATTRIBUTE_NAMES } from '../../entities/entitySchema.js';
+import { PERSONALITY_AXES } from '../../entities/raceRegistry.js';
+
+const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+const two = (n) => String(n).padStart(2, '0');
+
+// A short, REAL, human-readable label for a node. There is no place-name
+// generator in the backend (settlements are opaque ids like settlement_3_5), so
+// we surface the real identifier + kind/tier rather than invent "Aldervale".
+export function nodeLabel(node) {
+  if (!node) return '(unknown)';
+  const c = node.classification;
+  if (c?.kind === 'settlement') return `${cap(c.tier)} · ${c.settlementId}`;
+  return `${cap(node.terrainType)} wilderness`;
+}
+export function nodeSubLabel(node, faction) {
+  const c = node?.classification;
+  if (c?.kind === 'settlement') {
+    return `${cap(c.tier)} tier${faction ? ` · ${faction}` : ' · unclaimed'}`;
+  }
+  const notability = c?.notability != null ? c.notability.toFixed(2) : '—';
+  const hosp = c?.hospitability != null ? c.hospitability.toFixed(2) : '—';
+  return `Wilderness · notability ${notability} · hospitability ${hosp}`;
+}
+
+// ---- HUD -------------------------------------------------------------------
+export function buildHud(ctx) {
+  const { player, engines } = ctx;
+  const node = engines.map.getNode(engines.travel.getPlayerNodeId());
+  const faction = node?.classification?.kind === 'settlement'
+    ? engines.faction.getFactionControl(node)
+    : null;
+  const d = engines.clock.getCurrentDate();
+  const bucket = deriveTimeOfDayBucket(d.hour);
+  const first = player.identity.firstName || '';
+  const last = player.identity.lastName || '';
+  return {
+    initials: (first[0] || '') + (last[0] || ''),
+    name: `${first} ${last}`.trim(),
+    vocation: player.identity.vocation || '',
+    level: { text: 'Level —', unwired: true }, // no level field on entities
+    location: nodeLabel(node),
+    locationSub: nodeSubLabel(node, faction),
+    clockText: `${d.monthName} Wk${d.week} Day ${d.day} · ${two(d.hour)}:${two(d.minute)} (${bucket})`,
+    visibility: { pct: 0, unwired: true }, // no visibility/notoriety stat exists
+  };
+}
+
+// ---- TRAVEL ----------------------------------------------------------------
+function tierDisplay(node) {
+  const c = node?.classification;
+  if (c?.kind === 'settlement') return cap(c.tier);
+  if (c?.notability != null) return c.notability >= 0.6 ? 'Notable' : 'Remote';
+  return 'Wilds';
+}
+function formatDuration(gameSeconds) {
+  const mins = Math.max(1, Math.round(gameSeconds / 60));
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}h ${two(m)}m` : `${m}m`;
+}
+export function buildTravel(ctx) {
+  const { engines, config } = ctx;
+  const secPerUnit = config.travel?.gameSecondsPerDistanceUnit ?? 180;
+  const here = engines.map.getNode(engines.travel.getPlayerNodeId());
+  const faction = here?.classification?.kind === 'settlement'
+    ? engines.faction.getFactionControl(here)
+    : null;
+
+  const destinations = (here?.edges || []).map((edge) => {
+    const dest = engines.map.getNode(edge.to);
+    const dist = dest ? Math.hypot(dest.x - here.x, dest.y - here.y) : 0;
+    return {
+      nodeId: edge.to,
+      heading: edge.heading,
+      passable: edge.passable,
+      x: dest ? dest.x : here.x,
+      y: dest ? dest.y : here.y,
+      name: dest ? nodeLabel(dest) : '(unmapped)',
+      tierDisplay: dest ? tierDisplay(dest) : '—',
+      kind: dest?.classification?.kind || 'unknown',
+      dist: dist.toFixed(1),
+      time: formatDuration(dist * secPerUnit),
+      // The flagged UNWIRED case: no per-node difficulty/danger scalar exists.
+      // We show the chip styling but the value is not backed by any engine.
+      risk: { label: '?', unwired: true },
+    };
+  });
+
+  const incidents = engines.travel.getIncidents()
+    .filter((i) => i.category && i.category !== 'none')
+    .map((i) => ({
+      legIndex: i.legIndex,
+      categoryLabel: incidentCategoryLabel(i.category),
+      text: i.narration || '(narration pending…)',
+    }))
+    .reverse();
+
+  return {
+    here,
+    hereLabel: nodeLabel(here),
+    hereSub: nodeSubLabel(here, faction),
+    activity: engines.travel.getActiveActivity(),
+    destinations,
+    incidents,
+    // POI "seek out" targets the player actually holds reveal authority for.
+    seekTargets: buildSeekTargets(ctx, here),
+  };
+}
+function incidentCategoryLabel(cat) {
+  const labels = { animal: 'Animal', bandit: 'Bandit', npc: 'NPC', environmental: 'Environmental', mundane: 'Mundane', none: 'Quiet' };
+  return labels[cat] || cat;
+}
+function buildSeekTargets(ctx, node) {
+  if (!node) return [];
+  const { pool, discovered, undiscovered } = ctx.engines.poi.getPoiState(node);
+  const revealed = ctx.engines.poi.getRevealedPoiIds();
+  return {
+    discovered: pool.filter((p) => discovered.has(p.id)).map((p) => ({ id: p.id, category: p.category })),
+    total: pool.length,
+    found: discovered.size,
+    seekable: undiscovered.filter((p) => revealed.has(p.id)).map((p) => ({ id: p.id, category: p.category })),
+  };
+}
+
+// ---- CONVERSATION ----------------------------------------------------------
+export function buildConversation(ctx) {
+  const { player, npc, engines, world } = ctx;
+  const edge = engines.relationships.getRelationship(npc.id, player.id);
+  const tier = relationshipTier(edge.stats);
+  const recentMemories = (npc.psychology.memories || []).map((m) => ({ seq: m.seq, summary: m.summary }));
+  const emotionRead = deriveEmotion(npc, recentMemories, world.getEventLog());
+  const history = engines.conversationHistory.getConversationHistory(npc.id, player.id);
+
+  return {
+    name: `${npc.identity.firstName} ${npc.identity.lastName}`.trim(),
+    sub: `${cap(npc.identity.race)} · ${npc.identity.age} · ${npc.identity.vocation}`,
+    accent: npc.psychology.voice?.accent || '—',
+    tier: cap(tier),
+    // No 0-100 relationship scale exists; the tier is the real read.
+    percent: { unwired: true },
+    stats: edge.stats,
+    emotion: emotionRead.reads[0]?.emotion || 'calm',
+    memories: recentMemories.map((m) => m.summary), // real (may be empty)
+    transcript: history.map((line) => ({
+      who: line.speakerId === npc.id ? 'npc' : 'player',
+      text: line.text,
+    })),
+    // No dialogue-option generator exists; only the freeform Say box is wired.
+    choices: { unwired: true, count: 3 },
+  };
+}
+
+// ---- JOURNAL ---------------------------------------------------------------
+export function buildJournal(ctx) {
+  const { player, engines } = ctx;
+
+  // People — WIRED from the relationship store. Show each NPC Rowan has an edge
+  // to, with the real tier + real stats. The numeric progress bar the mock shows
+  // implies a 0-100 progression system that does not exist → unwired.
+  const knownIds = ctx.knownNpcIds || [];
+  const people = knownIds.map((id) => {
+    const other = engines.registry.get(id);
+    const edge = engines.relationships.getRelationship(player.id, id);
+    const tier = relationshipTier(edge.stats);
+    return {
+      name: other ? `${other.identity.firstName} ${other.identity.lastName}`.trim() : id,
+      tier: cap(tier),
+      statsNote: Object.entries(edge.stats).map(([k, v]) => `${k} ${v}`).join(' · '),
+      bar: { unwired: true },
+    };
+  });
+
+  // Map — WIRED from materialized nodes + POI discovery.
+  const nodeIds = ctx.materializedNodeIds ? ctx.materializedNodeIds() : [];
+  const nodes = nodeIds.map((id) => engines.map.getNode(id)).filter(Boolean);
+  const hereId = engines.travel.getPlayerNodeId();
+  const mapNodes = nodes.map((n) => ({
+    id: n.id,
+    x: n.x,
+    y: n.y,
+    here: n.id === hereId,
+    kind: n.classification?.kind,
+    label: nodeLabel(n),
+  }));
+
+  return {
+    // Log (quests) — no quest engine exists.
+    quests: { unwired: true },
+    people,
+    mapNodes,
+  };
+}
+
+// ---- CHARACTER -------------------------------------------------------------
+export function buildCharacter(ctx) {
+  const { player } = ctx;
+  const axes = player.psychology.personalityAxes || {};
+  // Temperament: the 5 canonical axes. Present ones are real; any missing from
+  // this entity (the hand-authored trio carry only 3) are genuinely unbacked.
+  const temperament = PERSONALITY_AXES.map((axis) => ({
+    label: cap(axis),
+    value: axes[axis],
+    unwired: axes[axis] === undefined,
+  }));
+
+  const attributes = ATTRIBUTE_NAMES.map((name) => ({
+    label: cap(name),
+    value: player.capabilities.attributes[name],
+  }));
+
+  const skills = Object.keys(PRIMARY_SKILL_ATTRIBUTE).map((name) => ({
+    label: cap(name),
+    raw: player.capabilities.skills.primary[name],
+    effective: effectiveSkill(player, name),
+  }));
+
+  const traits = (player.psychology.personalityTraits || []).map((t) => ({ name: cap(t) }));
+
+  return {
+    identity: {
+      initials: (player.identity.firstName[0] || '') + (player.identity.lastName[0] || ''),
+      name: `${player.identity.firstName} ${player.identity.lastName}`.trim(),
+      sub: `${cap(player.identity.race)} · ${player.identity.age} · ${player.identity.vocation}`,
+      accent: player.psychology.voice?.accent || '—',
+      bio: player.identity.biography || player.identity.background || '',
+    },
+    temperament,       // wired (present axes) / unwired (absent axes)
+    attributes,        // wired
+    skills,            // wired
+    traits,            // wired (personalityTraits)
+    vitals: { unwired: true },     // no HP/stamina/carry system
+    standing: { unwired: true },   // no player faction-standing engine
+    perks: { unwired: true },      // no perk system
+    visibility: { unwired: true },
+  };
+}
+
+// ---- TRADING (no economy engine — merchant identity is the only real part) --
+export function buildTrading(ctx) {
+  const { merchant } = ctx;
+  return {
+    merchantName: merchant ? `${merchant.identity.firstName} ${merchant.identity.lastName}`.trim() : 'a merchant',
+    merchantSub: merchant ? merchant.identity.vocation : '',
+    unwired: true, // gold, prices, offers, confirm — none backed
+  };
+}
+
+// ---- CRAFT (no crafting engine) --------------------------------------------
+export const CRAFT_STATIONS = [
+  { id: 'blacksmith', label: 'Blacksmithing', stationName: 'The Forge', accent: 'var(--accent)' },
+  { id: 'alchemy', label: 'Alchemy', stationName: 'Alchemy Table', accent: 'var(--info)' },
+  { id: 'enchanting', label: 'Enchanting', stationName: "Enchanter's Altar", accent: 'var(--good)' },
+];
+export function buildCraft(ctx, stationId) {
+  const station = CRAFT_STATIONS.find((s) => s.id === stationId) || CRAFT_STATIONS[0];
+  return { station, unwired: true }; // recipes, ingredients, skill gates, craft — none backed
+}
+
+// ---- INVENTORY (no item/equipment engine) ----------------------------------
+export const INVENTORY_CATEGORIES = [
+  { id: 'all', label: 'All' },
+  { id: 'weapons', label: 'Weapons' },
+  { id: 'armor', label: 'Armor' },
+  { id: 'consumables', label: 'Consumables' },
+  { id: 'books', label: 'Books' },
+  { id: 'misc', label: 'Misc' },
+];
+export function buildInventory(ctx) {
+  // player.inventory exists on the schema but there is no item schema/engine, so
+  // it is a real (empty) array. Everything item/equip-related is unwired.
+  return {
+    items: ctx.player.inventory || [],
+    unwired: true,
+  };
+}
+
+// Shared: relationship tier ladder labels (for a legend, if needed).
+export const REL_TIERS = TIER_THRESHOLDS.map((t) => t.label);
