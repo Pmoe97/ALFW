@@ -75,8 +75,9 @@ function readPoi(config) {
 
 // Quantize node coords into stable integer keys for lattice seeding, the same
 // 1e3 quantization generateNeighborCandidates uses so a node's POI draws are
-// pinned to its exact coordinate.
-function nodeKeys(node) {
+// pinned to its exact coordinate. Exported for economyEngine's shop-stock
+// baseline, which must pin its draws to the same coordinate keys.
+export function nodeKeys(node) {
   return { kx: Math.round(node.x * 1000), ky: Math.round(node.y * 1000) };
 }
 

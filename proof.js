@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { initWorldState, createWorldState } from './worldState.js';
 import { createFarmEngine } from './engines/farmEngine.js';
 import { createReputationEngine } from './engines/reputationEngine.js';
-import { createPlayer, createNpc, effectiveSkill } from './entities/entitySchema.js';
+import { createPlayer, createNpc, effectiveSkill, PRIMARY_SKILL_ATTRIBUTE } from './entities/entitySchema.js';
 import {
   createRelationshipStore,
   relationshipTier,
@@ -92,6 +92,25 @@ import {
 } from './engines/npcGeneratorEngine.js';
 import { deriveVoiceDirectives, CONFLICTING_PAIRS, AXIS_DIRECTIVES, MAX_DIRECTIVES } from './entities/voice.js';
 import { deriveEmotion } from './entities/deriveEmotion.js';
+import {
+  createEconomyEngine,
+  deriveInventory,
+  deriveGold,
+  deriveBaselineStock,
+  deriveShopStock,
+  deriveEquipped,
+  priceFor,
+  shopIdOf,
+} from './engines/economyEngine.js';
+import {
+  ITEM_DEFS,
+  RECIPES,
+  SHOP_POOLS,
+  AUTHORED_SHOPS,
+  EQUIP_SLOTS,
+  getItemDef,
+} from './engines/economyData.js';
+import { INVENTORY_CATEGORIES, CRAFT_STATIONS } from './game/ui/model.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
@@ -205,6 +224,7 @@ const mira = createNpc({
         willpower: 6, deception: 4, intimidation: 3, performance: 5, persuasion: 6,
         magic: 0, investigation: 2, religion: 3, history: 4, perception: 5,
         survival: 3, medicine: 2,
+        smithing: 1, alchemy: 3, enchanting: 0,
       },
       secondary: {
         riding: 1, dancing: 2, swimming: 1, cleaning: 6, disguise: 1,
@@ -273,6 +293,7 @@ const rowan = createPlayer({
         willpower: 3, deception: 2, intimidation: 2, performance: 1, persuasion: 2,
         magic: 0, investigation: 4, religion: 1, history: 2, perception: 5,
         survival: 6, medicine: 2,
+        smithing: 2, alchemy: 1, enchanting: 0,
       },
       secondary: {
         riding: 5, dancing: 1, swimming: 3, cleaning: 2, disguise: 2,
@@ -3182,6 +3203,318 @@ console.log(`TR10 PASSED: two identical journeys ⇒ identical ${trJourneyA.worl
 console.log('\nSection TR PASSED: real travel/explore/dialogue verbs carry their timeContexts, incidents roll deterministically and commit before narration, and every new cache is rebuildable from the log alone');
 
 // =============================================================================
+// Section EC: inventory & economy — items, gold, shop stock, trade, craft, equip.
+//
+// The economy engine reuses BOTH established disciplines at once, exactly like
+// the POI engine. BASELINE SHOP STOCK is a PURE function of (config, shopRef) —
+// per-slot fresh mulberry32 seeded from hashCoords in its own salt band — so
+// EC2 is the M1 analogue: stock is fixed by position, never re-rolled.
+// Everything that CHANGES (inventories, gold, shop deltas, equipment) is
+// log-derived with provably-redundant caches; EC4 is the G5/L3/M6 analogue.
+// The new property this section puts on trial is ATOMICITY: trade and craft
+// are REACT verbs that resolve everything live and then commit exactly ONE
+// outcome event carrying the full resolved transaction — so a success moves
+// items AND gold AND shop stock in one indivisible fold (EC5, EC7), and a
+// REJECTED attempt appends NOTHING and perturbs NO cache (EC6) — no partial-
+// failure state can exist at any log position.
+// =============================================================================
+console.log('\n=== Section EC: inventory & economy (items, gold, shops, trade, craft, equip) ===');
+
+function runSectionEC(record) {
+  const synthShopNode = (tier, x, y) => ({
+    id: `syn_ec_${tier}_${x}_${y}`,
+    x,
+    y,
+    classification: { kind: 'settlement', tier, settlementId: `syn_ec_${tier}`, baselineFaction: null, notability: null, hospitability: null },
+  });
+  const synthShopPoi = (node, b) => ({
+    id: `poi_${node.id}_b${b}`,
+    nodeId: node.id,
+    category: 'shop',
+    source: 'baseline',
+    prominence: 0.5,
+    hidden: false,
+    data: {},
+  });
+  const ecCfg = structuredClone(mapBaseConfig);
+  const ledgerRef = { kind: 'authored', shopId: 'shop_rusted_ledger' };
+
+  // --- EC1: static-data sanity — every cross-reference in the shipped catalog
+  // resolves, so a content edit that dangles an id fails here, not mid-game.
+  {
+    const categoryIds = INVENTORY_CATEGORIES.map((c) => c.id);
+    const stationIds = CRAFT_STATIONS.map((s) => s.id);
+    for (const def of Object.values(ITEM_DEFS)) {
+      assert.ok(categoryIds.includes(def.category), `item ${def.id} category "${def.category}" must be a UI inventory category`);
+      assert.ok(def.baseValue > 0 && Number.isInteger(def.baseValue), `item ${def.id} needs a positive integer baseValue`);
+      if (def.slot !== undefined) assert.ok(EQUIP_SLOTS.includes(def.slot), `item ${def.id} slot "${def.slot}" must be a mannequin slot`);
+    }
+    for (const recipe of Object.values(RECIPES)) {
+      assert.ok(stationIds.includes(recipe.stationId), `recipe ${recipe.id} station "${recipe.stationId}" must be a UI craft station`);
+      assert.ok(recipe.skill.name in PRIMARY_SKILL_ATTRIBUTE, `recipe ${recipe.id} skill "${recipe.skill.name}" must be a primary skill`);
+      for (const defId of Object.keys(recipe.inputs)) getItemDef(defId);
+      getItemDef(recipe.output.defId);
+    }
+    for (const [poolName, entries] of Object.entries(SHOP_POOLS)) {
+      for (const e of entries) {
+        getItemDef(e.defId);
+        assert.ok(e.weight > 0, `pool ${poolName} entry ${e.defId} needs a positive weight`);
+      }
+    }
+    const authoredIds = new Set();
+    for (const shop of Object.values(AUTHORED_SHOPS)) {
+      for (const defId of Object.keys(shop.stock.stacks)) getItemDef(defId);
+      for (const inst of shop.stock.instances) {
+        getItemDef(inst.itemDefId);
+        assert.ok(!authoredIds.has(inst.instanceId), `authored instance id ${inst.instanceId} must be unique`);
+        authoredIds.add(inst.instanceId);
+      }
+    }
+    record(`EC1 PASSED: shipped catalog is closed — ${Object.keys(ITEM_DEFS).length} item defs, ${Object.keys(RECIPES).length} recipes, ${Object.values(SHOP_POOLS).flat().length} pool entries, ${Object.keys(AUTHORED_SHOPS).length} authored shop(s), every cross-reference resolves`);
+  }
+
+  // --- EC2: baseline stock is a pure function of (config, shopRef) — the M1
+  // analogue. Identical twice-derived; distinct per poi index; tier-gated
+  // (hamlet shops never carry city-gated goods); the authored Rusted Ledger
+  // baseline IS the shipped record.
+  {
+    const village = synthShopNode('village', 2600, 2600);
+    const shopA = synthShopPoi(village, 0);
+    const refA = { kind: 'poi', node: village, poi: shopA };
+    const once = deriveBaselineStock(ecCfg, refA);
+    assert.deepEqual(deriveBaselineStock(ecCfg, refA), once, 're-deriving baseline stock must be byte-identical (never re-rolled)');
+    const slots = Object.values(once.stacks).reduce((s, q) => s + (q > 0 ? 1 : 0), 0) + once.instances.length;
+    assert.ok(slots > 0, 'a village shop must have non-empty baseline stock');
+    assert.equal(once.gold, ecCfg.economy.shop.baseGoldByTier.village, 'shop gold comes from the tier table');
+
+    const refB = { kind: 'poi', node: village, poi: synthShopPoi(village, 3) };
+    assert.notDeepEqual(deriveBaselineStock(ecCfg, refB), once, 'two shop POIs at the same node must stock independently (salt includes the poi index)');
+
+    const cityGated = new Set(SHOP_POOLS.general.filter((e) => e.minTier === 'city').map((e) => e.defId));
+    const hamlet = synthShopNode('hamlet', 3100, 3100);
+    const hamletStock = deriveBaselineStock(ecCfg, { kind: 'poi', node: hamlet, poi: synthShopPoi(hamlet, 0) });
+    for (const defId of [...Object.keys(hamletStock.stacks), ...hamletStock.instances.map((i) => i.itemDefId)]) {
+      assert.ok(!cityGated.has(defId), `hamlet shop must not carry city-gated ${defId}`);
+    }
+
+    const ledger = deriveBaselineStock(ecCfg, ledgerRef);
+    assert.deepEqual(
+      ledger,
+      { ...structuredClone(AUTHORED_SHOPS.shop_rusted_ledger.stock), gold: AUTHORED_SHOPS.shop_rusted_ledger.baselineGold },
+      'the authored Rusted Ledger baseline must be exactly the shipped record'
+    );
+    record(`EC2 PASSED: baseline stock is position-deterministic (${slots} village slots, poi-index-independent, tier-gated) and the authored Rusted Ledger baseline equals the shipped record`);
+  }
+
+  // --- EC3: pricing — flat baseValue spread through priceFor, shop margin on
+  // every def (sells strictly above buys, no arbitrage loop anywhere in the
+  // catalog), hand-computed spot checks.
+  {
+    const ctx = { category: 'authored', tier: null, nodeId: null };
+    assert.equal(priceFor(ecCfg, ITEM_DEFS.iron_sword, ctx, 'shopSells'), 78, 'iron_sword (60c) sells at round(60×1.3)=78');
+    assert.equal(priceFor(ecCfg, ITEM_DEFS.iron_sword, ctx, 'shopBuys'), 42, 'iron_sword (60c) buys at floor(60×0.7)=42');
+    assert.equal(priceFor(ecCfg, ITEM_DEFS.spring_water, ctx, 'shopSells'), 1, 'the cheapest item still sells for at least 1c');
+    for (const def of Object.values(ITEM_DEFS)) {
+      const sells = priceFor(ecCfg, def, ctx, 'shopSells');
+      const buys = priceFor(ecCfg, def, ctx, 'shopBuys');
+      assert.ok(sells > buys, `${def.id}: shop must sell (${sells}) strictly above what it buys for (${buys})`);
+    }
+    record(`EC3 PASSED: priceFor spreads baseValue into a strict shop margin for all ${Object.keys(ITEM_DEFS).length} defs (60c → sells 78 / buys 42)`);
+  }
+
+  // Lived fixture for EC4-EC8: the sample world (whose construction seeds
+  // Rowan's purse and pack) plus a fresh economy engine that must prime those
+  // seed events from the log it finds.
+  const fan = buildSampleWorld();
+  const economy = createEconomyEngine(fan.world, fan.registry);
+  const rowanId = fan.rowan.id;
+
+  // --- EC4: seed grants fold through the log — gold and holdings match the
+  // seeded amounts, stacks merge on grant and vanish at zero, and every cache
+  // equals its own from-scratch rebuild (the primed-cache proof).
+  {
+    assert.equal(economy.getGold(rowanId), 150, 'the seeded purse must be primed from the log');
+    const inv = economy.getInventory(rowanId);
+    assert.equal(inv.stacks.iron_ore, 4, 'seeded stack quantities must fold');
+    assert.equal(inv.instances.length, 3, 'seeded instances must fold');
+    assert.ok(inv.instances.some((i) => i.itemDefId === 'iron_dagger'), 'the seeded dagger is an instance');
+
+    economy.grantItems(rowanId, { stacks: { bread: 3 } }, 'ec_test');
+    assert.equal(economy.getInventory(rowanId).stacks.bread, 5, 'granting an owned stack must merge (2+3), not duplicate the key');
+    const dropped = economy.drop(rowanId, { stacks: { bread: 5 } });
+    assert.ok(dropped.ok, 'dropping the whole stack must succeed');
+    assert.ok(!('bread' in economy.getInventory(rowanId).stacks), 'a stack at zero must DELETE its key, not linger as 0');
+
+    assert.deepEqual(economy.rebuildGold(rowanId), economy.getGold(rowanId), 'gold cache must equal its own rebuild');
+    assert.deepEqual(economy.rebuildInventory(rowanId), economy.getInventory(rowanId), 'inventory cache must equal its own rebuild');
+    assert.deepEqual(deriveInventory(fan.world.getEventLog(), rowanId), economy.getInventory(rowanId), 'the pure derivation must agree with the cached read');
+    record('EC4 PASSED: seeded gold/holdings primed from the log, stacks merge on grant and delete at zero, caches equal their rebuilds');
+  }
+
+  // --- EC5: an accepted trade is ONE event that moves everything at once —
+  // items and gold on the actor, stock and gold on the shop, conservation
+  // between them; instance records move intact; every cache stays rebuildable.
+  {
+    const before = {
+      logLen: fan.world.getEventLog().length,
+      gold: economy.getGold(rowanId),
+      shop: economy.getShopStock(ledgerRef),
+    };
+    const daggerId = 'itm_a_rusted_ledger_2';
+    const result = economy.trade(rowanId, ledgerRef, { buy: [{ defId: 'ale', qty: 2 }, { instanceId: daggerId }] });
+    assert.ok(result.ok, `the buy must succeed (${result.reason ?? ''})`);
+    assert.equal(fan.world.getEventLog().length, before.logLen + 1, 'a trade commits EXACTLY ONE event');
+    assert.equal(result.entry.type, 'TRADE_COMPLETED', 'and that event is the committed transaction');
+
+    const shopAfter = economy.getShopStock(ledgerRef);
+    const spent = before.gold - economy.getGold(rowanId);
+    assert.ok(spent > 0, 'buying must cost gold');
+    assert.equal(shopAfter.gold - before.shop.gold, spent, 'gold is conserved: what the player spent the shop gained');
+    assert.equal(before.shop.stacks.ale - (shopAfter.stacks.ale ?? 0), 2, 'the shop stack depleted by the bought quantity (finite stock)');
+    assert.ok(!shopAfter.instances.some((i) => i.instanceId === daggerId), 'the bought instance left the shop');
+    assert.ok(economy.getInventory(rowanId).instances.some((i) => i.instanceId === daggerId), 'and arrived in the inventory with the same id');
+
+    const sellBack = economy.trade(rowanId, ledgerRef, { sell: [{ defId: 'iron_ingot', qty: 1 }] });
+    assert.ok(sellBack.ok, 'the sell must succeed');
+    assert.equal(shopAfter.gold - economy.getShopStock(ledgerRef).gold, priceFor(ecCfg, ITEM_DEFS.iron_ingot, { category: 'authored', tier: null, nodeId: null }, 'shopBuys'), 'the shop paid its buy price');
+    assert.equal(economy.getShopStock(ledgerRef).stacks.iron_ingot, 1, 'the sold stack entered shop stock');
+
+    assert.deepEqual(economy.rebuildInventory(rowanId), economy.getInventory(rowanId), 'inventory cache must equal its rebuild after trades');
+    assert.deepEqual(economy.rebuildGold(rowanId), economy.getGold(rowanId), 'gold cache must equal its rebuild after trades');
+    assert.deepEqual(economy.rebuildShopStock(ledgerRef), economy.getShopStock(ledgerRef), 'shop stock (baseline ⊕ deltas) must equal its pure rebuild');
+    assert.deepEqual(deriveShopStock(fan.world.getState().config, fan.world.getEventLog(), ledgerRef), economy.getShopStock(ledgerRef), 'the pure shop-stock derivation must agree with the cached read');
+    record(`EC5 PASSED: buy (2 ale + the Ledger's dagger, ${spent}c) and sell each committed as ONE atomic event — gold conserved, stock finite, instance ids intact, caches equal rebuilds`);
+  }
+
+  // --- EC6: a REJECTED attempt appends NOTHING — wrong for any reason (actor
+  // gold, shop stock, ownership, equipped, shop gold), the log length is
+  // unchanged and every cache is bit-for-bit undisturbed.
+  {
+    // Equip the seeded dagger so the equipped-sell rejection is exercised
+    // (this one dispatch is a real, accepted action — the snapshot follows it).
+    const seededDagger = economy.getInventory(rowanId).instances.find((i) => i.itemDefId === 'iron_dagger');
+    assert.ok(economy.equip(rowanId, 'mainHand', seededDagger.instanceId).ok, 'equipping the seeded dagger must succeed');
+    economy.grantItems(rowanId, { stacks: { soul_shard: 10 } }, 'ec_test'); // enough to out-price the shop's purse
+
+    const snapshot = () => ({
+      logLen: fan.world.getEventLog().length,
+      gold: economy.getGold(rowanId),
+      inv: economy.getInventory(rowanId),
+      equipped: economy.getEquipped(rowanId),
+      shop: economy.getShopStock(ledgerRef),
+    });
+    const before = snapshot();
+    const attempts = [
+      ['insufficient actor gold', economy.trade(rowanId, ledgerRef, { buy: [{ defId: 'arcane_dust', qty: 2 }, { instanceId: 'itm_a_rusted_ledger_0' }, { instanceId: 'itm_a_rusted_ledger_1' }, { defId: 'ale', qty: 8 }, { defId: 'playing_cards', qty: 4 }, { defId: 'dice_set', qty: 6 }, { defId: 'dockside_ballads', qty: 2 }, { defId: 'bread', qty: 4 }] })],
+      ['insufficient shop stock', economy.trade(rowanId, ledgerRef, { buy: [{ defId: 'ale', qty: 999 }] })],
+      ['selling an unowned stack', economy.trade(rowanId, ledgerRef, { sell: [{ defId: 'oak_wood', qty: 1 }] })],
+      ['selling an unowned instance', economy.trade(rowanId, ledgerRef, { sell: [{ instanceId: 'itm_nope_0' }] })],
+      ['selling an equipped item', economy.trade(rowanId, ledgerRef, { sell: [{ instanceId: seededDagger.instanceId }] })],
+      ['a buyout the shop cannot afford', economy.trade(rowanId, ledgerRef, { sell: [{ defId: 'soul_shard', qty: 10 }] })],
+      ['an empty offer', economy.trade(rowanId, ledgerRef, {})],
+      ['dropping an equipped item', economy.drop(rowanId, { instanceIds: [seededDagger.instanceId] })],
+    ];
+    for (const [label, result] of attempts) {
+      assert.equal(result.ok, false, `${label} must be rejected`);
+      assert.ok(typeof result.reason === 'string' && result.reason.length > 0, `${label} must carry a human-readable reason`);
+    }
+    assert.deepEqual(snapshot(), before, 'after every rejection: log length unchanged, no cache perturbed — nothing was half-applied');
+    record(`EC6 PASSED: ${attempts.length} invalid attempts (gold, stock, ownership, equipped, shop purse, empty) each rejected with a reason and appended NOTHING`);
+  }
+
+  // --- EC7: craft is deterministic and atomic — ONE event both consumes the
+  // inputs and produces the output (stackable and instance-minting recipes,
+  // instance ids embedding the entry's own seq); an unmet gate or missing
+  // material appends nothing; success at exactly the gate value.
+  {
+    const invBefore = economy.getInventory(rowanId);
+    const logLenBefore = fan.world.getEventLog().length;
+
+    const smelt = economy.craft(rowanId, 'blacksmith', 'bs_smelt'); // smithing gate 4, Rowan effective 7
+    assert.ok(smelt.ok, `bs_smelt must succeed (${smelt.reason ?? ''})`);
+    assert.equal(fan.world.getEventLog().length, logLenBefore + 1, 'a craft commits EXACTLY ONE event');
+    const invAfterSmelt = economy.getInventory(rowanId);
+    assert.equal(invBefore.stacks.iron_ore - invAfterSmelt.stacks.iron_ore, 2, 'the same event consumed the ore...');
+    assert.equal(invAfterSmelt.stacks.iron_ingot - (invBefore.stacks.iron_ingot ?? 0), 1, '...and produced the ingot — no state between');
+
+    // Instance-minting + instance-consuming recipe: the enchant consumes the
+    // seeded copper_ring INSTANCE and mints the output with the entry's seq.
+    assert.equal(effectiveSkill(fan.registry.get(rowanId), 'enchanting'), RECIPES.en1.skill.min, 'the fixture pins Rowan EXACTLY at the en1 gate — meeting it must be enough');
+    const ringBefore = economy.getInventory(rowanId).instances.find((i) => i.itemDefId === 'copper_ring');
+    const enchant = economy.craft(rowanId, 'enchanting', 'en1');
+    assert.ok(enchant.ok, `en1 at exactly the gate must succeed (${enchant.reason ?? ''})`);
+    const invAfterEnchant = economy.getInventory(rowanId);
+    assert.ok(!invAfterEnchant.instances.some((i) => i.instanceId === ringBefore.instanceId), 'the consumed ring instance is gone');
+    const minted = invAfterEnchant.instances.find((i) => i.itemDefId === 'ring_of_embers');
+    assert.equal(minted.instanceId, `itm_${enchant.entry.seq}_0`, "the minted instance id embeds its own event's seq");
+
+    const failSnapshot = fan.world.getEventLog().length;
+    const gated = economy.craft(rowanId, 'blacksmith', 'bs2'); // smithing gate 9 > Rowan's 7
+    assert.equal(gated.ok, false, 'an unmet skill gate must reject');
+    const starved = economy.craft(rowanId, 'enchanting', 'en2'); // needs a bone_amulet Rowan doesn't own
+    assert.equal(starved.ok, false, 'missing materials must reject');
+    const misStationed = economy.craft(rowanId, 'blacksmith', 'al1'); // alchemy recipe at the forge
+    assert.equal(misStationed.ok, false, 'a recipe crafted at the wrong station must reject');
+    assert.equal(fan.world.getEventLog().length, failSnapshot, 'rejected crafts append NOTHING');
+    assert.deepEqual(economy.rebuildInventory(rowanId), economy.getInventory(rowanId), 'inventory cache must equal its rebuild after crafts');
+    record(`EC7 PASSED: crafts are atomic single events (smelt consumed 2 ore → 1 ingot; en1 at exactly gate ${RECIPES.en1.skill.min} consumed the ring instance and minted itm_${enchant.entry.seq}_0); gate/material/station rejections appended nothing`);
+  }
+
+  // --- EC8: equipment — slot-checked, last-write-wins per slot, unequip via
+  // null, ownership enforced, and the derived map rebuildable from the log.
+  {
+    const inv = economy.getInventory(rowanId);
+    const jerkin = inv.instances.find((i) => i.itemDefId === 'leather_jerkin');
+    const ember = inv.instances.find((i) => i.itemDefId === 'ring_of_embers');
+
+    assert.equal(economy.equip(rowanId, 'head', jerkin.instanceId).ok, false, 'a chest piece must not fit the head slot');
+    assert.equal(economy.equip(rowanId, 'ring', 'itm_nope_1').ok, false, 'equipping an unowned instance must reject');
+    assert.ok(economy.equip(rowanId, 'chest', jerkin.instanceId).ok, 'the jerkin equips to chest');
+    assert.ok(economy.equip(rowanId, 'ring', ember.instanceId).ok, 'the crafted ring equips');
+    assert.equal(economy.getEquipped(rowanId).ring, ember.instanceId, 'the ring slot holds the crafted ring');
+
+    // Replace-in-slot: crafting another enchanted ring needs another copper
+    // ring and more arcane dust (en1 in EC7 consumed the seeded dust) — barter
+    // the Ledger's ring + dust against three soul shards, enchant, equip over.
+    assert.ok(economy.trade(rowanId, ledgerRef, { buy: [{ instanceId: 'itm_a_rusted_ledger_0' }, { defId: 'arcane_dust', qty: 2 }], sell: [{ defId: 'soul_shard', qty: 3 }] }).ok, 'barter: the Ledger ring and dust for three shards');
+    const secondRing = economy.craft(rowanId, 'enchanting', 'en1');
+    assert.ok(secondRing.ok, `the second enchant must succeed (${secondRing.reason ?? ''})`);
+    const secondId = `itm_${secondRing.entry.seq}_0`;
+    assert.ok(economy.equip(rowanId, 'ring', secondId).ok, 'equipping over an occupied slot is a plain replace');
+    assert.equal(economy.getEquipped(rowanId).ring, secondId, 'last write wins the slot');
+    assert.ok(economy.getInventory(rowanId).instances.some((i) => i.instanceId === ember.instanceId), 'the replaced ring stays in the inventory');
+
+    assert.ok(economy.equip(rowanId, 'ring', null).ok, 'null unequips');
+    assert.ok(!('ring' in economy.getEquipped(rowanId)), 'the slot is empty after unequip');
+    assert.ok(economy.drop(rowanId, { instanceIds: [secondId] }).ok, 'the unequipped ring can now be dropped');
+
+    assert.deepEqual(economy.rebuildEquipped(rowanId), economy.getEquipped(rowanId), 'equipped cache must equal its own rebuild');
+    assert.deepEqual(deriveEquipped(fan.world.getEventLog(), rowanId), economy.getEquipped(rowanId), 'the pure equipped derivation must agree with the cached read');
+    record('EC8 PASSED: equip is slot-checked and ownership-checked, replace is last-write-wins with the old item retained, null unequips, and the equipped map rebuilds from the log');
+  }
+
+  // Determinism at the raw-state level: the exact same lived economy twice ⇒
+  // identical logs, and gold/holdings derive identically from either.
+  return { log: fan.world.getEventLog() };
+}
+
+const sectionEcLinesA = [];
+const ecRunA = runSectionEC((m) => {
+  sectionEcLinesA.push(m);
+  console.log(m);
+});
+
+// --- EC-final: determinism across full runs (M-final analogue) — the entire
+// section re-run produces byte-identical output AND a byte-identical event log.
+const sectionEcLinesB = [];
+const ecRunB = runSectionEC((m) => sectionEcLinesB.push(m));
+assert.deepEqual(sectionEcLinesA, sectionEcLinesB, 'Section EC output must be byte-identical across two full runs');
+assert.deepEqual(ecRunB.log, ecRunA.log, 'the identical lived economy must produce the identical event log');
+console.log(`EC-final PASSED: Section EC produced identical output (${sectionEcLinesA.length} lines) and an identical ${ecRunA.log.length}-event log across two full runs`);
+
+console.log('\nSection EC PASSED: baseline shop stock is a pure seeded function of (config, shopRef); inventories, gold, shop deltas, and equipment are log-derived and rebuildable; trade and craft commit as single atomic outcome events whose rejections append nothing');
+
+// =============================================================================
 // Section SL: save/load — round-tripping the ENTIRE world state.
 //
 // The architecture's core promise, put on trial end to end: raw state is
@@ -3243,7 +3576,8 @@ function slWireEngines(fan) {
       ),
   });
   const travel = createTravelEngine(fan.world, map, poi);
-  return { effects, map, poi, faction, npcGen, memory, clock, travel };
+  const economy = createEconomyEngine(fan.world, fan.registry);
+  return { effects, map, poi, faction, npcGen, memory, clock, travel, economy };
 }
 
 // slBuildLivedInWorld — build a fresh world and LIVE in it: a representative
@@ -3254,7 +3588,7 @@ async function slBuildLivedInWorld() {
   const fan = buildSampleWorld();
   const { world, registry, relationships, conversationHistory, races, mira, rowan, sable } = fan;
   const engines = slWireEngines(fan);
-  const { map, poi, faction, npcGen, travel } = engines;
+  const { map, poi, faction, npcGen, travel, economy } = engines;
 
   // Count expected vs landed enhancements so the settle-wait below is exact:
   // every committed rememberer fires one background enhancement under the stub.
@@ -3341,6 +3675,27 @@ async function slBuildLivedInWorld() {
   }
   conversationHistory.recordDialogueLine(mira.id, sable.id, sable.id, 'Rough night at the tables?');
 
+  // Economy: one of every event family, so the save carries a purchase from a
+  // GENERATED shop POI (finite seeded stock), a sale to the AUTHORED Rusted
+  // Ledger, an atomic craft, and two equips — on top of the construction-time
+  // seed grants already in the log. The purchase line is picked
+  // deterministically (sorted first stack, else first instance).
+  const shopPoi = poi.getPoiState(village).pool.find((p) => p.category === 'shop');
+  assert.ok(shopPoi, 'SL needs a shop POI in the village pool (config drift?)');
+  const slShopRef = { kind: 'poi', node: village, poi: shopPoi };
+  const slVillageStock = economy.getShopStock(slShopRef);
+  const slFirstStackId = Object.keys(slVillageStock.stacks).sort()[0];
+  const slBuyLine = slFirstStackId
+    ? { defId: slFirstStackId, qty: 1 }
+    : { instanceId: slVillageStock.instances[0].instanceId };
+  assert.ok(economy.trade(rowan.id, slShopRef, { buy: [slBuyLine] }).ok, 'the village shop purchase must succeed');
+  assert.ok(economy.trade(rowan.id, { kind: 'authored', shopId: 'shop_rusted_ledger' }, { sell: [{ defId: 'iron_ingot', qty: 1 }] }).ok, 'the Rusted Ledger sale must succeed');
+  assert.ok(economy.craft(rowan.id, 'alchemy', 'al1').ok, 'the salve craft must succeed');
+  const slDagger = economy.getInventory(rowan.id).instances.find((i) => i.itemDefId === 'iron_dagger');
+  assert.ok(economy.equip(rowan.id, 'mainHand', slDagger.instanceId).ok, 'equipping the seeded dagger must succeed');
+  const slRing = economy.getInventory(rowan.id).instances.find((i) => i.itemDefId === 'copper_ring');
+  assert.ok(economy.equip(rowan.id, 'ring', slRing.instanceId).ok, 'equipping the seeded ring must succeed');
+
   // Real travel: three legs along the explored graph. Leg one runs under the
   // live stub so its narration is AI-ENHANCED (the enhancement is settled
   // before anything else dispatches, so the log's event order is
@@ -3380,7 +3735,7 @@ async function slBuildLivedInWorld() {
   world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 }); // partial progress only
   assert.ok(travel.getActiveActivity(), 'SL leaves leg three open — the save must capture an in-transit activity');
 
-  return { ...fan, ...engines, village, hamlet, victim, exploredNodeIds };
+  return { ...fan, ...engines, village, hamlet, victim, exploredNodeIds, shopPoi };
 }
 
 const slA = await slBuildLivedInWorld();
@@ -3614,15 +3969,50 @@ for (let i = 0; slL.travel.getActiveActivity(); i++) {
 assert.equal(slL.travel.getPlayerNodeId(), slResumeDest, 'the loaded world resumes the leg and arrives at the destination the original chose');
 console.log(`SL15 PASSED: travel round-trips — position, ${slIncidents.length} incidents (AI-enhanced and fallback narration both), and the open mid-leg activity, which resumed and arrived after load`);
 
-console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read matches the original exactly');
+// --- SL16: economy — gold, holdings, equipment, and BOTH kinds of shop stock
+// (a generated shop POI's seeded baseline ⊕ trade deltas, and the authored
+// Rusted Ledger's) round-trip; every loaded cache equals its own rebuild; and
+// the loaded economy is LIVE — one more trade continues the log and moves the
+// player's and the shop's purses coherently. Holdings/equipment are the exact
+// class of state the memory-engine overwrite bug was about: were any of it a
+// live-only mutation instead of a logged event, the loaded side would diverge
+// here.
+const slLedgerRef = { kind: 'authored', shopId: 'shop_rusted_ledger' };
+const slPoiShopRef = { kind: 'poi', node: slA.village, poi: slA.shopPoi };
+assert.equal(slL.economy.getGold(slA.rowan.id), slA.economy.getGold(slA.rowan.id), "the player's gold must round-trip");
+assert.deepEqual(slL.economy.getInventory(slA.rowan.id), slA.economy.getInventory(slA.rowan.id), "the player's holdings (stacks + instances) must round-trip");
+assert.deepEqual(slL.economy.getEquipped(slA.rowan.id), slA.economy.getEquipped(slA.rowan.id), 'the equipped map must round-trip');
+assert.ok(slL.economy.getEquipped(slA.rowan.id).mainHand, 'the equipped dagger is still in hand after load');
+for (const [label, ref] of [['generated shop POI', slPoiShopRef], ['authored Rusted Ledger', slLedgerRef]]) {
+  assert.deepEqual(slL.economy.getShopStock(ref), slA.economy.getShopStock(ref), `${label} stock must round-trip (baseline re-derived, deltas replayed)`);
+  assert.deepEqual(slL.economy.rebuildShopStock(ref), slL.economy.getShopStock(ref), `loaded ${label} stock must equal its own rebuild`);
+}
+assert.deepEqual(slL.economy.rebuildGold(slA.rowan.id), slL.economy.getGold(slA.rowan.id), 'loaded gold cache must equal its own rebuild');
+assert.deepEqual(slL.economy.rebuildInventory(slA.rowan.id), slL.economy.getInventory(slA.rowan.id), 'loaded inventory cache must equal its own rebuild');
+assert.deepEqual(slL.economy.rebuildEquipped(slA.rowan.id), slL.economy.getEquipped(slA.rowan.id), 'loaded equipped cache must equal its own rebuild');
+
+const slEcSeqBefore = slL.world.getEventLog().length;
+const slEcGoldBefore = slL.economy.getGold(slA.rowan.id);
+const slEcShopGoldBefore = slL.economy.getShopStock(slLedgerRef).gold;
+const slEcTrade = slL.economy.trade(slA.rowan.id, slLedgerRef, { buy: [{ defId: 'bread', qty: 1 }] });
+assert.ok(slEcTrade.ok, `a post-load trade must succeed (${slEcTrade.reason ?? ''})`);
+assert.equal(slEcTrade.entry.seq, slEcSeqBefore, 'the post-load trade must continue seq from the loaded history');
+const slEcSpent = slEcGoldBefore - slL.economy.getGold(slA.rowan.id);
+assert.ok(slEcSpent > 0, 'the post-load purchase must cost gold');
+assert.equal(slL.economy.getShopStock(slLedgerRef).gold - slEcShopGoldBefore, slEcSpent, 'post-load gold is still conserved between player and shop');
+assert.deepEqual(slL.economy.rebuildInventory(slA.rowan.id), slL.economy.getInventory(slA.rowan.id), 'the post-load inventory cache must still equal its own rebuild');
+console.log(`SL16 PASSED: economy round-trips — gold, holdings, equipment, generated + authored shop stock all match, loaded caches equal their rebuilds, and a post-load trade (${slEcSpent}c of bread) continued the log coherently`);
+
+console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read (inventory, gold, and shop stock included) matches the original exactly');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
 // transport plumbing, fallback + contract enforcement, memory fan-out, the
 // permanent-voice / transient-emotion derivations, NPC schedules with
 // presence-aware witnesses, pair-keyed conversation history, the
-// travel/explore verbs with their seeded incident system, and the full
-// save/load round-trip of the entire world state.
+// travel/explore verbs with their seeded incident system, the inventory &
+// economy engine (seeded shop stock, atomic trade/craft, equipment), and the
+// full save/load round-trip of the entire world state.
 // Real live-AI verification
 // (dialogue lines AND memory-summary lines) can only happen by hand inside an
 // actual Perchance page.

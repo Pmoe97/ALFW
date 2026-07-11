@@ -146,6 +146,14 @@
       "turnIntensityByCategory": { "animal": 3, "bandit": 2, "npc": 3, "environmental": 3, "mundane": 4 }
     }
   },
+  "economy": {
+    "spread": { "shopSellsFactor": 1.3, "shopBuysFactor": 0.7 },
+    "shop": {
+      "stockSizeByTier": { "hamlet": 4, "village": 6, "town": 8, "city": 10, "capital": 12 },
+      "baseGoldByTier": { "hamlet": 80, "village": 150, "town": 300, "city": 600, "capital": 1000 },
+      "maxStackQty": 5
+    }
+  },
   "raceRegistry": {
     "races": {
       "human": {

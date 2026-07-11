@@ -10,13 +10,16 @@
 //   clock.getCurrentDate, travel.getPlayerNodeId / getActiveActivity / getIncidents,
 //   faction.getFactionControl, relationships.getRelationship + relationshipTier,
 //   conversationHistory.getConversationHistory, deriveEmotion, effectiveSkill,
-//   deriveTimeOfDayBucket.
+//   deriveTimeOfDayBucket, economy.getGold / getInventory / getEquipped /
+//   getShopStock / quote (+ priceFor, getItemDef, recipesForStation).
 
 import { relationshipTier, TIER_THRESHOLDS } from '../../entities/relationshipStore.js';
 import { deriveEmotion } from '../../entities/deriveEmotion.js';
 import { deriveTimeOfDayBucket } from '../../engines/worldClockEngine.js';
 import { effectiveSkill, PRIMARY_SKILL_ATTRIBUTE, ATTRIBUTE_NAMES } from '../../entities/entitySchema.js';
 import { PERSONALITY_AXES } from '../../entities/raceRegistry.js';
+import { priceFor, shopContextOf } from '../../engines/economyEngine.js';
+import { getItemDef, recipesForStation, EQUIP_SLOTS } from '../../engines/economyData.js';
 
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const two = (n) => String(n).padStart(2, '0');
@@ -253,28 +256,127 @@ export function buildCharacter(ctx) {
   };
 }
 
-// ---- TRADING (no economy engine — merchant identity is the only real part) --
-export function buildTrading(ctx) {
-  const { merchant } = ctx;
+// ---- ECONOMY-SHARED ---------------------------------------------------------
+// Flatten an engine holdings read ({stacks, instances}) into UI rows joined
+// with the item definitions. Stack rows key by defId (qty = the count),
+// instance rows key by their instanceId (qty = 1) so per-instance items stay
+// individually selectable/tradeable.
+function holdingsRows(holdings, equippedIds = new Set()) {
+  const rows = [];
+  for (const defId of Object.keys(holdings.stacks).sort()) {
+    const def = getItemDef(defId);
+    rows.push({
+      key: defId, instanceId: null, defId, name: def.name, category: def.category,
+      typeLabel: cap(def.category), weight: def.weight, value: def.baseValue,
+      qty: holdings.stacks[defId], slot: null, equipped: false,
+    });
+  }
+  for (const inst of holdings.instances) {
+    const def = getItemDef(inst.itemDefId);
+    rows.push({
+      key: inst.instanceId, instanceId: inst.instanceId, defId: def.id, name: def.name,
+      category: def.category, typeLabel: cap(def.category), weight: def.weight,
+      value: def.baseValue, qty: 1, slot: def.slot ?? null,
+      equipped: equippedIds.has(inst.instanceId),
+    });
+  }
+  return rows;
+}
+
+// ---- TRADING (economyEngine — Sable's authored Rusted Ledger stock) ---------
+// The offer is UI state: offerPlayerIds / offerMerchantIds hold row keys, one
+// occurrence per unit (a stack key may appear several times). This converts
+// them to the engine's offer shape; the ENGINE prices and validates via
+// quote() — the exact same code path trade() commits through, so an enabled
+// Confirm can never dispatch a rejectable trade.
+export function offerFromState(state) {
+  const toLines = (keys) => {
+    const stackCounts = {};
+    const lines = [];
+    for (const key of keys) {
+      if (key.startsWith('itm_')) lines.push({ instanceId: key });
+      else stackCounts[key] = (stackCounts[key] ?? 0) + 1;
+    }
+    for (const defId of Object.keys(stackCounts).sort()) lines.push({ defId, qty: stackCounts[defId] });
+    return lines;
+  };
+  return { buy: toLines(state.offerMerchantIds), sell: toLines(state.offerPlayerIds) };
+}
+
+export function buildTrading(ctx, state) {
+  const { merchant, player, merchantShopRef, config } = ctx;
+  const economy = ctx.engines.economy;
+  const shopCtx = shopContextOf(merchantShopRef);
+  const stock = economy.getShopStock(merchantShopRef);
+  const equippedIds = new Set(Object.values(economy.getEquipped(player.id)));
+
+  const priceRows = (rows, direction) =>
+    rows.map((r) => ({ ...r, unitPrice: priceFor(config, getItemDef(r.defId), shopCtx, direction) }));
+  const inOfferCounts = (keys) => keys.reduce((m, k) => m.set(k, (m.get(k) ?? 0) + 1), new Map());
+  const playerOffer = inOfferCounts(state.offerPlayerIds);
+  const merchantOffer = inOfferCounts(state.offerMerchantIds);
+
+  const playerRows = priceRows(holdingsRows(economy.getInventory(player.id), equippedIds), 'shopBuys')
+    .map((r) => ({ ...r, inOffer: playerOffer.get(r.key) ?? 0 }));
+  const shopRows = priceRows(holdingsRows(stock), 'shopSells')
+    .map((r) => ({ ...r, inOffer: merchantOffer.get(r.key) ?? 0 }));
+
+  const offer = offerFromState(state);
+  const empty = offer.buy.length === 0 && offer.sell.length === 0;
+  const quoted = empty
+    ? { ok: false, empty: true, lines: [], netGold: 0 }
+    : { empty: false, ...economy.quote(player.id, merchantShopRef, offer) };
+
   return {
     merchantName: merchant ? `${merchant.identity.firstName} ${merchant.identity.lastName}`.trim() : 'a merchant',
     merchantSub: merchant ? merchant.identity.vocation : '',
-    unwired: true, // gold, prices, offers, confirm — none backed
+    playerGold: economy.getGold(player.id),
+    shopGold: stock.gold,
+    playerRows,
+    shopRows,
+    offer,
+    quote: quoted,
   };
 }
 
-// ---- CRAFT (no crafting engine) --------------------------------------------
+// ---- CRAFT (economyEngine — recipes, ingredient have/need, skill gates) -----
 export const CRAFT_STATIONS = [
   { id: 'blacksmith', label: 'Blacksmithing', stationName: 'The Forge', accent: 'var(--accent)' },
   { id: 'alchemy', label: 'Alchemy', stationName: 'Alchemy Table', accent: 'var(--info)' },
   { id: 'enchanting', label: 'Enchanting', stationName: "Enchanter's Altar", accent: 'var(--good)' },
 ];
-export function buildCraft(ctx, stationId) {
+export function buildCraft(ctx, stationId, craftRecipeId) {
   const station = CRAFT_STATIONS.find((s) => s.id === stationId) || CRAFT_STATIONS[0];
-  return { station, unwired: true }; // recipes, ingredients, skill gates, craft — none backed
+  const { player } = ctx;
+  const inventory = ctx.engines.economy.getInventory(player.id);
+  const owned = (defId) =>
+    (inventory.stacks[defId] ?? 0) + inventory.instances.filter((i) => i.itemDefId === defId).length;
+
+  const recipes = recipesForStation(station.id).map((r) => {
+    const inputs = Object.entries(r.inputs).map(([defId, need]) => ({
+      defId, name: getItemDef(defId).name, need, have: owned(defId), met: owned(defId) >= need,
+    }));
+    const effective = effectiveSkill(player, r.skill.name);
+    const skillGate = { name: r.skill.name, min: r.skill.min, effective, met: effective >= r.skill.min };
+    const outDef = getItemDef(r.output.defId);
+    return {
+      id: r.id,
+      name: r.name,
+      output: { defId: outDef.id, name: outDef.name, qty: r.output.qty, value: outDef.baseValue },
+      inputs,
+      skillGate,
+      canCraft: skillGate.met && inputs.every((i) => i.met),
+    };
+  });
+
+  return {
+    station,
+    recipes,
+    selected: recipes.find((r) => r.id === craftRecipeId) ?? recipes[0] ?? null,
+  };
 }
 
-// ---- INVENTORY (no item/equipment engine) ----------------------------------
+// ---- INVENTORY (economyEngine — items, equipment, gold) ---------------------
 export const INVENTORY_CATEGORIES = [
   { id: 'all', label: 'All' },
   { id: 'weapons', label: 'Weapons' },
@@ -283,12 +385,31 @@ export const INVENTORY_CATEGORIES = [
   { id: 'books', label: 'Books' },
   { id: 'misc', label: 'Misc' },
 ];
-export function buildInventory(ctx) {
-  // player.inventory exists on the schema but there is no item schema/engine, so
-  // it is a real (empty) array. Everything item/equip-related is unwired.
+export function buildInventory(ctx, state = {}) {
+  const { player } = ctx;
+  const economy = ctx.engines.economy;
+  const equipped = economy.getEquipped(player.id);
+  const equippedIds = new Set(Object.values(equipped));
+  const all = holdingsRows(economy.getInventory(player.id), equippedIds);
+  const category = state.selectedCategory ?? 'all';
+  const items = category === 'all' ? all : all.filter((r) => r.category === category);
+
+  // slot -> the equipped row (for the mannequin chips and mobile equip list).
+  const equippedBySlot = {};
+  for (const slot of EQUIP_SLOTS) {
+    const id = equipped[slot];
+    equippedBySlot[slot] = id ? all.find((r) => r.instanceId === id) ?? null : null;
+  }
+
   return {
-    items: ctx.player.inventory || [],
-    unwired: true,
+    gold: economy.getGold(player.id),
+    items,
+    selected: all.find((r) => r.key === state.selectedItemId) ?? null,
+    equippedBySlot,
+    // Examine/Favorite stay unwired: there is no examine-text or favorites
+    // backing, and the audit marks exactly the missing pieces, no wider.
+    examine: { unwired: true },
+    favorite: { unwired: true },
   };
 }
 
