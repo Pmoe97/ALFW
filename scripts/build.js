@@ -20,35 +20,41 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.resolve(here, '../dist');
 mkdirSync(outDir, { recursive: true });
 
-const result = await build({
-  entryPoints: [path.resolve(here, '../game/testHarness.js')],
-  bundle: true,
-  format: 'iife',
-  platform: 'browser',
-  minify: true,
-  write: false,
-  alias: { 'node:fs': path.resolve(here, 'nodeFsShim.js') },
-  logLevel: 'info',
-});
-const code = result.outputFiles[0].text;
-
-// Pull the harness's own markup (style + panels) out of testHarness.html so
-// the Perchance bundle is fully self-contained — one paste gets both the
-// visible UI and the wired-up interactivity, matching what testHarness.js
-// expects to already exist in the DOM (it queries these elements by id).
-const harnessHtmlPath = path.resolve(here, '../game/testHarness.html');
-const harnessHtmlSource = readFileSync(harnessHtmlPath, 'utf8');
 const BEGIN_COMMENT = '<!-- PERCHANCE-BUNDLE:BEGIN -->';
 const END_COMMENT = '<!-- PERCHANCE-BUNDLE:END -->';
-const beginIdx = harnessHtmlSource.indexOf(BEGIN_COMMENT);
-const endIdx = harnessHtmlSource.indexOf(END_COMMENT);
-if (beginIdx === -1 || endIdx === -1) {
-  throw new Error(
-    'game/testHarness.html is missing its PERCHANCE-BUNDLE:BEGIN/END markers — cannot splice markup for the Perchance bundle'
-  );
-}
-const markup = harnessHtmlSource.slice(beginIdx + BEGIN_COMMENT.length, endIdx).trim();
 
-const outFile = path.join(outDir, 'alfw-perchance.html');
-writeFileSync(outFile, `${markup}\n<script>\n${code}\n</script>\n`, 'utf8');
-console.log(`Wrote ${outFile} (${markup.length} bytes markup + ${code.length} bytes minified JS)`);
+// bundleEntry — bundle one JS entry with esbuild, splice the reusable markup out
+// of its companion .html (between the PERCHANCE-BUNDLE markers), and write one
+// self-contained artifact: the spliced markup followed by the bundled <script>,
+// matching what the entry expects to already exist in the DOM. Two entries share
+// this: the interactive test harness and the real game UI.
+async function bundleEntry({ entry, html, out, label }) {
+  const result = await build({
+    entryPoints: [path.resolve(here, entry)],
+    bundle: true,
+    format: 'iife',
+    platform: 'browser',
+    minify: true,
+    write: false,
+    alias: { 'node:fs': path.resolve(here, 'nodeFsShim.js') },
+    logLevel: 'info',
+  });
+  const code = result.outputFiles[0].text;
+
+  const htmlSource = readFileSync(path.resolve(here, html), 'utf8');
+  const beginIdx = htmlSource.indexOf(BEGIN_COMMENT);
+  const endIdx = htmlSource.indexOf(END_COMMENT);
+  if (beginIdx === -1 || endIdx === -1) {
+    throw new Error(`${html} is missing its PERCHANCE-BUNDLE:BEGIN/END markers — cannot splice markup for the Perchance bundle`);
+  }
+  const markup = htmlSource.slice(beginIdx + BEGIN_COMMENT.length, endIdx).trim();
+
+  const outFile = path.join(outDir, out);
+  writeFileSync(outFile, `${markup}\n<script>\n${code}\n</script>\n`, 'utf8');
+  console.log(`Wrote ${outFile} (${label}: ${markup.length} bytes markup + ${code.length} bytes minified JS)`);
+}
+
+// The engine test harness (unchanged) and the real game UI (new). Both are
+// paste-ready Perchance artifacts; the game UI is the player-facing one.
+await bundleEntry({ entry: '../game/testHarness.js', html: '../game/testHarness.html', out: 'alfw-perchance.html', label: 'test harness' });
+await bundleEntry({ entry: '../game/app.js', html: '../game/app.html', out: 'alfw-perchance-app.html', label: 'game UI' });
