@@ -11,7 +11,8 @@
 //   faction.getFactionControl, relationships.getRelationship + relationshipTier,
 //   conversationHistory.getConversationHistory, deriveEmotion, effectiveSkill,
 //   deriveTimeOfDayBucket, economy.getGold / getInventory / getEquipped /
-//   getShopStock / quote (+ priceFor, getItemDef, recipesForStation).
+//   getShopStock / quote (+ priceFor, getItemDef, recipesForStation),
+//   quests.getQuestStatuses / getObjectiveProgress (+ questIds, getQuestDef).
 
 import { relationshipTier, TIER_THRESHOLDS } from '../../entities/relationshipStore.js';
 import { deriveEmotion } from '../../entities/deriveEmotion.js';
@@ -20,6 +21,7 @@ import { effectiveSkill, PRIMARY_SKILL_ATTRIBUTE, ATTRIBUTE_NAMES } from '../../
 import { PERSONALITY_AXES } from '../../entities/raceRegistry.js';
 import { priceFor, shopContextOf } from '../../engines/economyEngine.js';
 import { getItemDef, recipesForStation, EQUIP_SLOTS } from '../../engines/economyData.js';
+import { questIds, getQuestDef } from '../../engines/questData.js';
 
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const two = (n) => String(n).padStart(2, '0');
@@ -204,9 +206,66 @@ export function buildJournal(ctx) {
     label: nodeLabel(n),
   }));
 
+  // Log (quests) — WIRED from the quest engine: statuses are log-derived,
+  // objective progress is pure replay, and the accept/turn-in gating mirrors
+  // the engine's own location rule (the giver's node) so the buttons and the
+  // verbs can never disagree.
+  const statuses = engines.quests.getQuestStatuses();
+  const giverNameOf = (id) => {
+    const giver = engines.registry.get(id);
+    return giver ? `${giver.identity.firstName} ${giver.identity.lastName}`.trim() : id;
+  };
+  const rewardsNoteOf = (def) => {
+    const r = def.rewards ?? {};
+    const parts = [];
+    if (r.gold) parts.push(`${r.gold}c`);
+    for (const [defId, qty] of Object.entries(r.items?.stacks ?? {})) {
+      parts.push(`${qty}× ${getItemDef(defId).name}`);
+    }
+    if ((r.relationshipEvents ?? []).length > 0) {
+      const names = [...new Set(r.relationshipEvents.map((ev) => giverNameOf(ev.fromId).split(' ')[0]))];
+      parts.push(`${names.join(', ')}'s regard`);
+    }
+    for (const fc of r.factionControl ?? []) parts.push(`shifts ${fc.settlementId}`);
+    return parts.join(' · ') || '—';
+  };
+  const quests = { available: [], active: [], completed: [], failed: [] };
+  for (const questId of questIds()) {
+    const def = getQuestDef(questId);
+    const status = statuses[questId].status;
+    const giverName = giverNameOf(def.giverId);
+    const atGiver = hereId === def.giverNodeId;
+    if (status === 'available') {
+      quests.available.push({
+        id: questId,
+        title: def.title,
+        description: def.description,
+        giverName,
+        rewardsNote: rewardsNoteOf(def),
+        objectives: def.objectives.map((o) => ({ text: o.text })),
+        canAccept: atGiver,
+        acceptHint: atGiver ? '' : `Offered by ${giverName} — travel to their location to accept`,
+      });
+    } else if (status === 'active') {
+      const objectives = engines.quests.getObjectiveProgress(questId);
+      const allDone = objectives.every((o) => o.done);
+      quests.active.push({
+        id: questId,
+        title: def.title,
+        description: def.description,
+        giverName,
+        rewardsNote: rewardsNoteOf(def),
+        objectives,
+        canTurnIn: allDone && atGiver,
+        turnInHint: !allDone ? 'Objectives remain' : atGiver ? '' : `Return to ${giverName} to turn in`,
+      });
+    } else {
+      quests[status].push({ id: questId, title: def.title, giverName });
+    }
+  }
+
   return {
-    // Log (quests) — no quest engine exists.
-    quests: { unwired: true },
+    quests,
     people,
     mapNodes,
   };

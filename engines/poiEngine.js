@@ -208,8 +208,9 @@ export function deriveDiscoveredPoiIds(log, nodeId) {
 }
 
 // deriveRevealedPoiIds — PURE. The set of POI ids the player currently has reveal
-// authority for, replayed from POI_REVEAL_GRANTED. A future quest/inventory/spell
-// system dispatches these; presence in this set = authorized. A Set.
+// authority for, replayed from POI_REVEAL_GRANTED. The quest engine dispatches
+// these on contract acceptance (the debug menu can too); presence in this set =
+// authorized. A Set.
 export function deriveRevealedPoiIds(log) {
   const granted = new Set();
   for (const entry of log) {
@@ -404,22 +405,24 @@ export function createPoiEngine(world) {
     return exploreBlind(node);
   }
 
-  // injectPoi — add a POI to a node's pool AFTER generation (a quest system's
-  // entry point; used by proof now). This is fundamentally an event: content can
-  // be added to a node the player has already visited. Injected POIs do NOT
-  // auto-surface — the stub joins the undiscovered pool and still has to be
-  // explored (or directed to) like any baseline POI. Returns the injected stub.
+  // injectPoi — add a POI to a node's pool AFTER generation. Built as the
+  // quest system's entry point and now really called by it: questEngine's
+  // acceptQuest injects a contract's target POI here. This is fundamentally
+  // an event: content can be added to a node the player has already visited.
+  // Injected POIs do NOT auto-surface — the stub joins the undiscovered pool
+  // and still has to be explored (or directed to) like any baseline POI.
+  // Returns the injected stub.
   function injectPoi(nodeId, poiStub) {
     const poi = { ...poiStub, nodeId, source: 'injected' };
     world.dispatch(POI_INJECTED, { nodeId, poi });
     return poi;
   }
 
-  // grantRevealAuthority — grant reveal authority for a specific POI id. A
-  // quest/inventory/spell stand-in (the same stand-in discipline the debug
-  // time-context switch followed until travelEngine's real verbs retired it):
-  // it only dispatches; the subscribe handler updates the cache. Log-derived,
-  // so authority is rebuildable like everything else.
+  // grantRevealAuthority — grant reveal authority for a specific POI id.
+  // Formerly the quest/inventory/spell stand-in; questEngine's acceptQuest is
+  // its real caller now (the debug menu keeps its manual grant). It only
+  // dispatches; the subscribe handler updates the cache. Log-derived, so
+  // authority is rebuildable like everything else.
   function grantRevealAuthority(poiId) {
     return world.dispatch(POI_REVEAL_GRANTED, { poiId });
   }

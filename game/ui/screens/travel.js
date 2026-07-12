@@ -134,8 +134,9 @@ function destinationsList(ui, m, busy) {
     panel.appendChild(row);
   }
 
-  // Seek-out targets the player holds reveal authority for (granted via debug
-  // menu / future quest system) — a real, wired action.
+  // Seek-out targets the player holds reveal authority for (granted by the
+  // quest engine on contract acceptance, or the debug menu) — a real, wired
+  // action, and the path that surfaces a quest's hidden injected POI.
   const seek = m.seekTargets;
   if (seek && seek.seekable && seek.seekable.length) {
     panel.appendChild(div(sectionLabelStyle() + ' padding:6px 4px 2px;', { text: `Leads (${seek.found}/${seek.total} POIs found)` }));

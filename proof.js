@@ -110,6 +110,12 @@ import {
   EQUIP_SLOTS,
   getItemDef,
 } from './engines/economyData.js';
+import {
+  createQuestEngine,
+  deriveQuestStatuses,
+  deriveObjectiveProgress,
+} from './engines/questEngine.js';
+import { QUEST_DEFS, getQuestDef, questIds, OBJECTIVE_TYPES } from './engines/questData.js';
 import { INVENTORY_CATEGORIES, CRAFT_STATIONS } from './game/ui/model.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
@@ -3515,6 +3521,362 @@ console.log(`EC-final PASSED: Section EC produced identical output (${sectionEcL
 console.log('\nSection EC PASSED: baseline shop stock is a pure seeded function of (config, shopRef); inventories, gold, shop deltas, and equipment are log-derived and rebuildable; trade and craft commit as single atomic outcome events whose rejections append nothing');
 
 // =============================================================================
+// Section QU: quests & contracts — the guild board's log-backed lifecycle
+// (available → active → completed | failed) over hand-authored definitions,
+// with objectives detected by PURE LOG-REPLAY (no per-event-type
+// subscriptions) and rewards paid through the REAL existing systems:
+// economy.grantGold/grantItems, relationshipStore.recordRelationshipEvent,
+// factionEngine.setFactionControl, and the POI engine's injectPoi /
+// grantRevealAuthority — the pair built as quest stand-ins, getting their
+// first non-debug caller here. Replay safety is the headline: reconstructing
+// the whole world from its save must reproduce quest state WITHOUT
+// re-injecting POIs or re-granting a single reward.
+// =============================================================================
+console.log('\n=== Section QU: quests & contracts (guild board, log-backed lifecycle, real-system rewards) ===');
+
+function runSectionQU(record) {
+  // Fixture wiring: the app's engine order, minus npcGen/memory (helpNpc
+  // would fan out async AI memory enhancement; relationshipEffect alone
+  // handles the synchronous stat deltas the tier objective needs).
+  const fan = buildSampleWorld();
+  createRelationshipEffectEngine(fan.world, fan.relationships);
+  const quMap = createWorldMapEngine(fan.world);
+  const quPoi = createPoiEngine(fan.world);
+  const quClock = createWorldClockEngine(fan.world);
+  const quFaction = createFactionEngine(fan.world);
+  const quTravel = createTravelEngine(fan.world, quMap, quPoi);
+  const quEconomy = createEconomyEngine(fan.world, fan.registry);
+  const quests = createQuestEngine(fan.world, {
+    playerId: fan.rowan.id,
+    economy: quEconomy,
+    relationships: fan.relationships,
+    faction: quFaction,
+    poi: quPoi,
+    travel: quTravel,
+  });
+  const rowanId = fan.rowan.id;
+  const quCfg = fan.world.getState().config;
+  const quOrigin = quMap.getOriginNode();
+  const quNeighborIds = new Set(quMap.materializeNeighbors(quOrigin.id).neighbors.map((n) => n.id));
+
+  function quTickUntilIdle(label) {
+    for (let i = 0; quTravel.getActiveActivity(); i++) {
+      if (i > 200) throw new Error(`QU: ${label} never finished`);
+      fan.world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 });
+    }
+  }
+
+  // --- QU1: static closure — every id a shipped quest def references
+  // resolves against the REAL world it ships with: authored NPCs, item defs,
+  // recipes, objective types, relationship axes/tiers, POI categories, and —
+  // the seed-binding checks — the origin node, its materialized neighbors,
+  // and the generated settlement the faction consequence targets. A
+  // seed/config/content change that orphans a quest fails HERE, loudly, not
+  // in play.
+  {
+    const relationshipAxes = ['affection', 'comfort', 'trust', 'desire', 'obedience'];
+    const tierLabels = TIER_THRESHOLDS.map((t) => t.label);
+    const poiCategories = new Set([
+      ...Object.keys(quCfg.worldMap.poi.settlement.categories),
+      ...Object.keys(quCfg.worldMap.poi.wilderness.categories),
+    ]);
+    const factionCount = quCfg.worldMap.classification.faction.factionCount;
+    const injectedPoiIds = new Set();
+
+    for (const questId of questIds()) {
+      const def = getQuestDef(questId);
+      assert.equal(def.id, questId, `quest ${questId} must carry its own id`);
+      assert.ok(fan.registry.get(def.giverId), `quest ${questId} giver "${def.giverId}" must be a registered entity`);
+      assert.equal(def.giverNodeId, quOrigin.id, `quest ${questId} giverNodeId must be the generated origin node`);
+      assert.ok(def.objectives.length > 0, `quest ${questId} needs at least one objective`);
+
+      for (const objective of def.objectives) {
+        assert.ok(OBJECTIVE_TYPES.includes(objective.type), `quest ${questId} objective type "${objective.type}" must be shipped`);
+        if (objective.type === 'travelTo') {
+          assert.ok(
+            objective.nodeId === quOrigin.id || quNeighborIds.has(objective.nodeId),
+            `quest ${questId} travelTo node "${objective.nodeId}" must be the origin or a materialized origin neighbor`
+          );
+        } else if (objective.type === 'craftRecipe') {
+          assert.ok(RECIPES[objective.recipeId], `quest ${questId} recipe "${objective.recipeId}" must exist`);
+          assert.ok(Number.isInteger(objective.count) && objective.count > 0, `quest ${questId} craft count must be a positive integer`);
+        } else if (objective.type === 'deliverItems') {
+          assert.ok(fan.registry.get(objective.npcId), `quest ${questId} delivery target "${objective.npcId}" must be registered`);
+          for (const [defId, qty] of Object.entries(objective.stacks)) {
+            assert.ok(getItemDef(defId).stackable, `quest ${questId} delivery item "${defId}" must be stackable`);
+            assert.ok(Number.isInteger(qty) && qty > 0, `quest ${questId} delivery qty for "${defId}" must be a positive integer`);
+          }
+        } else if (objective.type === 'reachRelationshipTier') {
+          assert.ok(fan.registry.get(objective.npcId), `quest ${questId} tier target "${objective.npcId}" must be registered`);
+          assert.ok(tierLabels.includes(objective.tier), `quest ${questId} tier "${objective.tier}" must be an ordinary ladder tier`);
+        }
+      }
+
+      for (const { nodeId, poi: stub } of def.onAccept?.injectPois ?? []) {
+        assert.ok(nodeId === quOrigin.id || quNeighborIds.has(nodeId), `quest ${questId} injects into "${nodeId}", which must be the origin or a materialized origin neighbor`);
+        assert.ok(poiCategories.has(stub.category), `quest ${questId} injected POI category "${stub.category}" must be a configured category`);
+        assert.ok(!injectedPoiIds.has(stub.id), `injected POI id "${stub.id}" must be unique across quests`);
+        injectedPoiIds.add(stub.id);
+      }
+      for (const poiId of def.onAccept?.revealPoiIds ?? []) {
+        assert.ok(injectedPoiIds.has(poiId), `quest ${questId} reveal grant "${poiId}" must reference a POI the quest injects`);
+      }
+      // discoverPoi objectives must target something reachable: a POI the
+      // quest itself injects (v1's only discoverPoi flavor).
+      for (const objective of def.objectives) {
+        if (objective.type === 'discoverPoi') {
+          assert.ok(injectedPoiIds.has(objective.poiId), `quest ${questId} discoverPoi target "${objective.poiId}" must be injected by the quest`);
+        }
+      }
+
+      const rewards = def.rewards ?? {};
+      if (rewards.gold !== undefined) assert.ok(Number.isInteger(rewards.gold) && rewards.gold > 0, `quest ${questId} gold reward must be a positive integer`);
+      for (const defId of Object.keys(rewards.items?.stacks ?? {})) getItemDef(defId);
+      for (const ev of rewards.relationshipEvents ?? []) {
+        assert.ok(fan.registry.get(ev.fromId) && fan.registry.get(ev.toId), `quest ${questId} relationship reward entities must be registered`);
+        assert.ok(relationshipAxes.includes(ev.axis), `quest ${questId} relationship reward axis "${ev.axis}" must be a real axis`);
+      }
+      for (const fc of rewards.factionControl ?? []) {
+        const cellMatch = /^settlement_(-?\d+)_(-?\d+)$/.exec(fc.settlementId);
+        assert.ok(cellMatch, `quest ${questId} faction consequence settlement "${fc.settlementId}" must be a generated settlement id`);
+        const site = isSettlementSiteAccepted(quCfg, Number(cellMatch[1]), Number(cellMatch[2]));
+        assert.ok(site && site.id === fc.settlementId, `quest ${questId} faction consequence settlement "${fc.settlementId}" must be an ACCEPTED site under the shipped config`);
+        const factionIndex = Number(/^faction_(\d+)$/.exec(fc.factionId)?.[1] ?? NaN);
+        assert.ok(factionIndex >= 0 && factionIndex < factionCount, `quest ${questId} faction "${fc.factionId}" must be within factionCount ${factionCount}`);
+      }
+    }
+    record(`QU1 PASSED: shipped quest catalog is closed — ${questIds().length} defs, every giver/node/recipe/item/axis/tier/POI/settlement reference resolves against the real generated world`);
+  }
+
+  // The settlement node the camp contract's faction consequence targets,
+  // derived pure for the QU2 before/after control read.
+  const quSettlementSite = isSettlementSiteAccepted(quCfg, 1, -1);
+  const quSettlementNode = deriveNodeAt(quCfg, quSettlementSite.x, quSettlementSite.y);
+
+  // --- QU2: the headline lifecycle — accept at the giver's node (injecting
+  // the hidden camp POI and arming reveal authority: the stand-ins' first
+  // real caller), REALLY travel there, seek it out through the wired
+  // directed-explore verb, return, and turn in. Rewards land through the
+  // real systems (gold, Sable's trust, the village's faction flip), the
+  // status fact commits LAST, and every rejection appends nothing.
+  {
+    assert.deepEqual(quests.getQuestStatuses().quest_clear_camp, { status: 'available', acceptedSeq: null, resolvedSeq: null }, 'a fresh world offers the contract');
+
+    // Turn-in and abandon both require an ACTIVE quest.
+    const lenBefore = fan.world.getEventLog().length;
+    assert.equal(quests.completeQuest('quest_clear_camp').ok, false, 'completing an unaccepted quest must be rejected');
+    assert.equal(quests.abandonQuest('quest_clear_camp').ok, false, 'abandoning an unaccepted quest must be rejected');
+    assert.equal(fan.world.getEventLog().length, lenBefore, 'rejected quest verbs append NOTHING');
+
+    const accepted = quests.acceptQuest('quest_clear_camp');
+    assert.ok(accepted.ok, `accepting at the giver's node must succeed (${accepted.reason ?? ''})`);
+    assert.equal(accepted.entry.type, 'QUEST_ACCEPTED');
+    const injected = fan.world.getEventLog().filter((e) => e.type === 'POI_INJECTED' && e.payload.poi.id === 'poi_q_wolfpine_camp');
+    assert.equal(injected.length, 1, 'accepting must inject the camp POI exactly once (injectPoi retired as a stand-in)');
+    assert.equal(injected[0].payload.nodeId, 'node_6.285_-1.357', 'the camp lands on the authored hills neighbor');
+    assert.ok(quPoi.getRevealedPoiIds().has('poi_q_wolfpine_camp'), 'accepting must grant reveal authority (grantRevealAuthority retired as a stand-in)');
+    assert.equal(quests.getQuestStatuses().quest_clear_camp.status, 'active');
+    assert.equal(quests.acceptQuest('quest_clear_camp').ok, false, 're-accepting an active quest must be rejected');
+
+    const progress0 = quests.getObjectiveProgress('quest_clear_camp');
+    assert.deepEqual(progress0.map((o) => o.done), [false], 'the camp is not found at acceptance');
+    assert.equal(quests.completeQuest('quest_clear_camp').ok, false, 'turn-in with an unmet objective must be rejected');
+
+    // Travel to the camp's node for real (tick-driven arrival), seek it out
+    // through the wired directed-explore verb (the ONLY path that surfaces a
+    // hidden POI), and confirm the objective flips by pure log replay.
+    quTravel.startTravel('node_6.285_-1.357');
+    quTickUntilIdle('the leg to the camp node');
+    assert.equal(quTravel.getPlayerNodeId(), 'node_6.285_-1.357', 'arrived at the camp node');
+    assert.equal(quests.acceptQuest('quest_bread_run').ok, false, 'accepting away from the giver must be rejected (the board is a place)');
+    const sought = quTravel.startExploreDirected('poi_q_wolfpine_camp');
+    assert.equal(sought.poiId, 'poi_q_wolfpine_camp', 'directed explore with authority surfaces the hidden camp');
+    quTickUntilIdle('the explore window');
+    assert.deepEqual(quests.getObjectiveProgress('quest_clear_camp').map((o) => o.done), [true], 'the discoverPoi objective is met after POI_DISCOVERED');
+    assert.equal(quests.completeQuest('quest_clear_camp').ok, false, 'turn-in away from the giver must be rejected');
+
+    quTravel.startTravel(quOrigin.id);
+    quTickUntilIdle('the leg home');
+
+    const goldBefore = quEconomy.getGold(rowanId);
+    const trustBefore = deriveRelationshipStats(fan.world.getEventLog(), 'npc_sable', rowanId).trust;
+    assert.equal(quFaction.getFactionControl(quSettlementNode), quSettlementNode.classification.baselineFaction, 'the village is at its baseline faction before turn-in');
+    const done = quests.completeQuest('quest_clear_camp');
+    assert.ok(done.ok, `turn-in at the giver must succeed (${done.reason ?? ''})`);
+    assert.equal(done.entry.seq, fan.world.getEventLog().length - 1, 'QUEST_COMPLETED commits LAST — after every reward, so a failure could never strand a completed-but-unpaid quest');
+    const rewardEntries = fan.world.getEventLog().filter((e) =>
+      (e.type === 'GOLD_GRANTED' && e.payload.reason === 'quest_clear_camp') ||
+      (e.type === 'FACTION_CONTROL_CHANGED' && e.payload.settlementId === 'settlement_1_-1'));
+    assert.equal(rewardEntries.length, 2, 'exactly one gold grant and one faction flip were paid');
+    assert.ok(rewardEntries.every((e) => e.seq < done.entry.seq), 'every reward fact precedes the status fact');
+    assert.equal(quEconomy.getGold(rowanId), goldBefore + 60, 'the 60c bounty landed through economy.grantGold');
+    assert.equal(deriveRelationshipStats(fan.world.getEventLog(), 'npc_sable', rowanId).trust, trustBefore + 8, "Sable's trust moved through recordRelationshipEvent");
+    assert.equal(quFaction.getFactionControl(quSettlementNode), 'faction_2', 'the village flipped through setFactionControl');
+    assert.equal(deriveFactionControl(fan.world.getEventLog(), 'settlement_1_-1', quSettlementNode.classification.baselineFaction), 'faction_2', 'the pure faction derivation agrees');
+    assert.equal(quests.getQuestStatuses().quest_clear_camp.status, 'completed');
+    assert.equal(quests.acceptQuest('quest_clear_camp').ok, false, 'completed is terminal — no re-accept');
+    record(`QU2 PASSED: full lifecycle — accept injected the hidden camp + reveal authority (the stand-ins' first real caller), travel + directed explore met the objective by log replay, turn-in paid 60c / trust +8 / faction flip through the real systems with QUEST_COMPLETED last`);
+  }
+
+  // --- QU3: delivery — the bread run consumes the goods through the
+  // economy's new atomic ITEMS_TRANSFERRED (the one event type this task
+  // added to economy: player→NPC hand-off didn't exist), and an invalid
+  // transfer appends nothing.
+  {
+    const badTransfer = quEconomy.transferItems(rowanId, 'npc_mira', { stacks: { bread: 99 } }, 'qu_test');
+    assert.equal(badTransfer.ok, false, 'transferring more than is held must be rejected');
+    const badInstance = quEconomy.transferItems(rowanId, 'npc_mira', { stacks: { iron_dagger: 1 } }, 'qu_test');
+    assert.equal(badInstance.ok, false, 'transferring a non-stackable must be rejected (v1 is stacks-only)');
+
+    assert.ok(quests.acceptQuest('quest_bread_run').ok, 'accepting the bread run at the giver must succeed');
+    const progress = quests.getObjectiveProgress('quest_bread_run');
+    assert.deepEqual(progress.map((o) => o.done), [true], 'the seeded 2 bread already satisfy the delivery objective');
+    assert.equal(progress[0].note, 'ready to deliver');
+
+    const goldBefore = quEconomy.getGold(rowanId);
+    const done = quests.completeQuest('quest_bread_run');
+    assert.ok(done.ok, `the bread run turn-in must succeed (${done.reason ?? ''})`);
+    const transfers = fan.world.getEventLog().filter((e) => e.type === 'ITEMS_TRANSFERRED' && e.payload.reason === 'quest_bread_run');
+    assert.equal(transfers.length, 1, 'the delivery is ONE atomic transfer event');
+    assert.ok(!('bread' in quEconomy.getInventory(rowanId).stacks), "the player's bread stack is consumed (key deleted at zero)");
+    assert.equal(quEconomy.getInventory('npc_mira').stacks.bread, 2, "Mira's holdings gained the loaves (same event, other side)");
+    assert.deepEqual(deriveInventory(fan.world.getEventLog(), 'npc_mira'), quEconomy.getInventory('npc_mira'), 'the pure inventory derivation agrees for the NPC side');
+    assert.equal(quEconomy.getGold(rowanId), goldBefore + 20, 'the 20c payment landed');
+    assert.equal(quests.getObjectiveProgress('quest_bread_run')[0].note, 'delivered', 'after turn-in the objective reads from the transfer record, not the (now empty) holdings');
+    record('QU3 PASSED: delivery consumed 2 bread through ONE atomic ITEMS_TRANSFERRED (player side down, NPC side up, pure derivation agrees); invalid transfers appended nothing');
+  }
+
+  // --- QU4: the acceptance window + the remaining matchers — work done
+  // BEFORE accepting a contract never satisfies it (craft), and the
+  // multi-objective quest needs BOTH its travel arrival and the derived
+  // relationship tier.
+  {
+    assert.ok(quEconomy.craft(rowanId, 'alchemy', 'al1').ok, 'the pre-acceptance craft must succeed');
+    assert.ok(quests.acceptQuest('quest_salves').ok, 'accepting the salve contract must succeed');
+    const before = quests.getObjectiveProgress('quest_salves')[0];
+    assert.equal(before.done, false, 'a craft from BEFORE acceptance must not count (the window is seq > acceptedSeq)');
+    assert.equal(before.note, '0/1 crafted');
+    assert.ok(quEconomy.craft(rowanId, 'alchemy', 'al1').ok, 'the post-acceptance craft must succeed');
+    assert.deepEqual(quests.getObjectiveProgress('quest_salves').map((o) => o.done), [true]);
+    const vialsBefore = quEconomy.getInventory(rowanId).stacks.glass_vial ?? 0;
+    assert.ok(quests.completeQuest('quest_salves').ok, 'the salve turn-in must succeed');
+    assert.equal((quEconomy.getInventory(rowanId).stacks.glass_vial ?? 0) - vialsBefore, 2, 'the item reward landed through economy.grantItems');
+
+    assert.ok(quests.acceptQuest('quest_make_yourself_known').ok, 'accepting the two-objective contract must succeed');
+    const [walk0, befriend0] = quests.getObjectiveProgress('quest_make_yourself_known');
+    assert.equal(walk0.done, false, 'the north woods are unvisited at acceptance');
+    assert.equal(befriend0.done, false, `Mira starts below friend (${befriend0.note})`);
+    assert.equal(quests.completeQuest('quest_make_yourself_known').ok, false, 'turn-in with neither objective met must be rejected');
+
+    let helps = 0;
+    while (!quests.getObjectiveProgress('quest_make_yourself_known')[1].done) {
+      if (++helps > 20) throw new Error('QU4: the friend tier was never reached');
+      helpNpc(fan.world, rowanId, 'npc_mira');
+    }
+    assert.equal(relationshipTier(deriveRelationshipStats(fan.world.getEventLog(), 'npc_mira', rowanId)), 'friend', 'the tier objective flips exactly when the derived tier does');
+    assert.equal(quests.completeQuest('quest_make_yourself_known').ok, false, 'one objective is not both — the travel leg is still owed');
+
+    quTravel.startTravel('node_3.353_8.010');
+    quTickUntilIdle('the north-woods leg');
+    quTravel.startTravel(quOrigin.id);
+    quTickUntilIdle('the leg home from the woods');
+    assert.deepEqual(quests.getObjectiveProgress('quest_make_yourself_known').map((o) => o.done), [true, true]);
+    assert.ok(quests.completeQuest('quest_make_yourself_known').ok, 'the two-objective turn-in must succeed');
+    record(`QU4 PASSED: the acceptance window holds (pre-acceptance craft did not count), and the two-objective contract required BOTH the real travel arrival and the derived friend tier (${helps} helps)`);
+  }
+
+  // --- QU5: abandon — active → failed, terminal, and nothing was paid.
+  // A separate fresh fixture: the main one has consumed all four contracts.
+  {
+    const fan5 = buildSampleWorld();
+    createRelationshipEffectEngine(fan5.world, fan5.relationships);
+    const map5 = createWorldMapEngine(fan5.world);
+    const poi5 = createPoiEngine(fan5.world);
+    const faction5 = createFactionEngine(fan5.world);
+    const travel5 = createTravelEngine(fan5.world, map5, poi5);
+    const economy5 = createEconomyEngine(fan5.world, fan5.registry);
+    const quests5 = createQuestEngine(fan5.world, {
+      playerId: fan5.rowan.id, economy: economy5, relationships: fan5.relationships, faction: faction5, poi: poi5, travel: travel5,
+    });
+    assert.ok(quests5.acceptQuest('quest_bread_run').ok);
+    assert.ok(quests5.abandonQuest('quest_bread_run').ok, 'abandoning an active quest must succeed');
+    assert.equal(quests5.getQuestStatuses().quest_bread_run.status, 'failed');
+    assert.equal(quests5.acceptQuest('quest_bread_run').ok, false, 'failed is terminal in v1 — no re-accept');
+    assert.equal(quests5.completeQuest('quest_bread_run').ok, false, 'a failed quest cannot be turned in');
+    assert.equal(
+      fan5.world.getEventLog().filter((e) => e.type === 'GOLD_GRANTED' && e.payload.reason === 'quest_bread_run').length,
+      0,
+      'abandoning paid nothing'
+    );
+    record('QU5 PASSED: abandon moves active → failed (terminal), pays nothing, and blocks both re-accept and turn-in');
+  }
+
+  // --- QU6: redundancy — the pure derivation, the primed cache, and the
+  // from-scratch rebuild agree three ways, statuses and objectives both.
+  {
+    const log = fan.world.getEventLog();
+    assert.deepEqual(deriveQuestStatuses(log), quests.getQuestStatuses(), 'pure deriveQuestStatuses must agree with the cached read');
+    assert.deepEqual(quests.rebuildQuestStatuses(), quests.getQuestStatuses(), 'the quest status cache must equal its own rebuild');
+    for (const questId of questIds()) {
+      assert.deepEqual(deriveObjectiveProgress(log, questId, rowanId), quests.getObjectiveProgress(questId), `objective progress for ${questId} must derive identically`);
+    }
+    record('QU6 PASSED: statuses are three-way redundant (pure derive == primed cache == rebuild) and objective progress derives identically');
+  }
+
+  // --- QU7: replay safety — reconstruct the ENTIRE world from its save and
+  // wire fresh engines (the priming path). Quest statuses reproduce, and NO
+  // reward re-granted: gold, Mira's bread, Sable's trust, and the faction
+  // flip are all exactly the original values, because the verbs are react
+  // handlers that never prime.
+  {
+    const replay = buildSampleWorld({ save: parseSave(serializeWorld(fan.world)) });
+    createRelationshipEffectEngine(replay.world, replay.relationships);
+    const mapR = createWorldMapEngine(replay.world);
+    const poiR = createPoiEngine(replay.world);
+    const factionR = createFactionEngine(replay.world);
+    const travelR = createTravelEngine(replay.world, mapR, poiR);
+    const economyR = createEconomyEngine(replay.world, replay.registry);
+    const questsR = createQuestEngine(replay.world, {
+      playerId: replay.rowan.id, economy: economyR, relationships: replay.relationships, faction: factionR, poi: poiR, travel: travelR,
+    });
+    assert.deepEqual(questsR.getQuestStatuses(), quests.getQuestStatuses(), 'quest statuses must reproduce from the log alone');
+    assert.equal(economyR.getGold(rowanId), quEconomy.getGold(rowanId), 'gold must NOT change on replay — rewards never re-grant');
+    assert.deepEqual(economyR.getInventory('npc_mira'), quEconomy.getInventory('npc_mira'), "Mira's delivered bread must not double");
+    assert.deepEqual(
+      deriveRelationshipStats(replay.world.getEventLog(), 'npc_sable', rowanId),
+      deriveRelationshipStats(fan.world.getEventLog(), 'npc_sable', rowanId),
+      "Sable's trust must not double"
+    );
+    assert.equal(factionR.getFactionControl(quSettlementNode), 'faction_2', 'the faction flip replays from its committed fact, not a re-fired reward');
+    assert.equal(
+      replay.world.getEventLog().filter((e) => e.type === 'POI_INJECTED' && e.payload.poi.id === 'poi_q_wolfpine_camp').length,
+      1,
+      'the camp was not re-injected on replay'
+    );
+    record('QU7 PASSED: a full save/replay reconstruction reproduces quest state with zero re-granted rewards and zero re-injected POIs');
+  }
+
+  return { log: fan.world.getEventLog() };
+}
+
+const sectionQuLinesA = [];
+const quRunA = runSectionQU((m) => {
+  sectionQuLinesA.push(m);
+  console.log(m);
+});
+
+// --- QU-final: determinism across full runs (the EC-final idiom) — the
+// entire section re-run produces byte-identical output AND a byte-identical
+// event log (no RNG anywhere in the quest layer).
+const sectionQuLinesB = [];
+const quRunB = runSectionQU((m) => sectionQuLinesB.push(m));
+assert.deepEqual(sectionQuLinesA, sectionQuLinesB, 'Section QU output must be byte-identical across two full runs');
+assert.deepEqual(quRunB.log, quRunA.log, 'the identical lived quest run must produce the identical event log');
+console.log(`QU-final PASSED: Section QU produced identical output (${sectionQuLinesA.length} lines) and an identical ${quRunA.log.length}-event log across two full runs`);
+
+console.log('\nSection QU PASSED: quest lifecycle is log-backed and derived (available → active → completed | failed), objectives are pure log-replay matches over real underlying events, acceptance is the first real caller of injectPoi/grantRevealAuthority, and completion pays only through the existing economy/relationship/faction systems with the status fact committed last');
+
+// =============================================================================
 // Section SL: save/load — round-tripping the ENTIRE world state.
 //
 // The architecture's core promise, put on trial end to end: raw state is
@@ -3577,7 +3939,10 @@ function slWireEngines(fan) {
   });
   const travel = createTravelEngine(fan.world, map, poi);
   const economy = createEconomyEngine(fan.world, fan.registry);
-  return { effects, map, poi, faction, npcGen, memory, clock, travel, economy };
+  const quests = createQuestEngine(fan.world, {
+    playerId: fan.rowan.id, economy, relationships: fan.relationships, faction, poi, travel,
+  });
+  return { effects, map, poi, faction, npcGen, memory, clock, travel, economy, quests };
 }
 
 // slBuildLivedInWorld — build a fresh world and LIVE in it: a representative
@@ -3695,6 +4060,15 @@ async function slBuildLivedInWorld() {
   assert.ok(economy.equip(rowan.id, 'mainHand', slDagger.instanceId).ok, 'equipping the seeded dagger must succeed');
   const slRing = economy.getInventory(rowan.id).instances.find((i) => i.itemDefId === 'copper_ring');
   assert.ok(economy.equip(rowan.id, 'ring', slRing.instanceId).ok, 'equipping the seeded ring must succeed');
+
+  // Quests (while still at the origin, the giver's node): one contract fully
+  // resolved — accepted, delivered through ITEMS_TRANSFERRED, completed with
+  // its rewards paid — and one left ACTIVE with its injected POI and reveal
+  // authority outstanding, so the save carries both a resolved and an open
+  // contract plus every quest event type.
+  assert.ok(engines.quests.acceptQuest('quest_bread_run').ok, 'accepting the bread run must succeed');
+  assert.ok(engines.quests.completeQuest('quest_bread_run').ok, 'completing the bread run must succeed');
+  assert.ok(engines.quests.acceptQuest('quest_clear_camp').ok, 'accepting the camp contract must succeed');
 
   // Real travel: three legs along the explored graph. Leg one runs under the
   // live stub so its narration is AI-ENHANCED (the enhancement is settled
@@ -4003,7 +4377,34 @@ assert.equal(slL.economy.getShopStock(slLedgerRef).gold - slEcShopGoldBefore, sl
 assert.deepEqual(slL.economy.rebuildInventory(slA.rowan.id), slL.economy.getInventory(slA.rowan.id), 'the post-load inventory cache must still equal its own rebuild');
 console.log(`SL16 PASSED: economy round-trips — gold, holdings, equipment, generated + authored shop stock all match, loaded caches equal their rebuilds, and a post-load trade (${slEcSpent}c of bread) continued the log coherently`);
 
-console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read (inventory, gold, and shop stock included) matches the original exactly');
+// --- SL17: quests — the resolved contract (completed, rewards paid) and the
+// OPEN contract (active, camp POI injected, reveal authority armed) both
+// round-trip; objective progress derives identically on the loaded side; the
+// loaded status cache equals its own rebuild; and NOTHING re-granted or
+// re-injected on load — the react-verb discipline's save/load payoff.
+assert.deepEqual(slL.quests.getQuestStatuses(), slA.quests.getQuestStatuses(), 'quest statuses must round-trip');
+assert.equal(slL.quests.getQuestStatuses().quest_bread_run.status, 'completed', 'the resolved contract stays completed');
+assert.equal(slL.quests.getQuestStatuses().quest_clear_camp.status, 'active', 'the open contract stays active');
+for (const slQuestId of questIds()) {
+  assert.deepEqual(slL.quests.getObjectiveProgress(slQuestId), slA.quests.getObjectiveProgress(slQuestId), `objective progress for ${slQuestId} must round-trip`);
+}
+assert.deepEqual(slL.quests.rebuildQuestStatuses(), slL.quests.getQuestStatuses(), 'loaded quest status cache must equal its own rebuild');
+const slCampNode = slL.map.getNode('node_6.285_-1.357');
+assert.ok(slL.poi.getPoiState(slCampNode).pool.some((p) => p.id === 'poi_q_wolfpine_camp'), "the open contract's injected camp is still in the node's pool after load");
+assert.ok(slL.poi.getRevealedPoiIds().has('poi_q_wolfpine_camp'), "the open contract's reveal authority survives load");
+assert.equal(
+  slL.world.getEventLog().filter((e) => e.type === 'GOLD_GRANTED' && e.payload.reason === 'quest_bread_run').length,
+  1,
+  'the bread-run bounty was paid exactly once — priming re-granted nothing'
+);
+assert.equal(
+  slL.world.getEventLog().filter((e) => e.type === 'POI_INJECTED' && e.payload.poi.id === 'poi_q_wolfpine_camp').length,
+  1,
+  'the camp was injected exactly once — priming re-injected nothing'
+);
+console.log('SL17 PASSED: quests round-trip — the completed and the open contract, objective progress, injected POI + reveal authority, loaded cache equals its rebuild, and load re-granted nothing');
+
+console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read (inventory, gold, shop stock, and quest state included) matches the original exactly');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed

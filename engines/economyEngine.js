@@ -18,7 +18,7 @@
 //
 // Apply vs react (the memoryEngine/npcGenerator rule): the apply* handlers
 // below only fold committed facts and are primed over history at
-// construction. The verbs (trade/craft/equip/drop) are REACT operations —
+// construction. The verbs (trade/craft/equip/drop/transferItems) are REACT operations —
 // they resolve everything live (stock, prices, ownership, skill gates) and
 // then dispatch exactly ONE atomic outcome event carrying the full resolved
 // transaction, or dispatch NOTHING. They are never primed: a loaded log
@@ -38,6 +38,7 @@ const TRADE_COMPLETED = 'TRADE_COMPLETED';
 const CRAFT_COMPLETED = 'CRAFT_COMPLETED';
 const EQUIP_CHANGED = 'EQUIP_CHANGED';
 const ITEM_DROPPED = 'ITEM_DROPPED';
+const ITEMS_TRANSFERRED = 'ITEMS_TRANSFERRED';
 
 // Salt band for shop-stock draws: SHOP_STOCK_SALT + poiIndex*32 + slotIndex.
 // 200000 sits far above every band in use (terrain/classification 11–4001,
@@ -125,6 +126,14 @@ function foldEntityEvent(holdings, entry, entityId) {
       if (p.entityId !== entityId) return;
       addStacks(holdings.stacks, p.stacks, -1);
       holdings.instances = removeInstances(holdings.instances, p.instanceIds);
+      return;
+    case ITEMS_TRANSFERRED:
+      // One atomic hand-off between two entities (quest deliveries): the
+      // giver's side subtracts, the receiver's side adds — the same event
+      // folds differently per entityId. Stacks only in v1 (deliveries are
+      // stackables); instance transfer is future scope.
+      if (p.fromId === entityId) addStacks(holdings.stacks, p.stacks, -1);
+      else if (p.toId === entityId) addStacks(holdings.stacks, p.stacks, +1);
       return;
     default:
       return;
@@ -364,6 +373,14 @@ export function createEconomyEngine(world, registry) {
     }
   }
 
+  // One function moves both parties — a transfer is atomic by construction,
+  // exactly like applyTradeCompleted's actor+shop fold.
+  function applyItemsTransferred(entry) {
+    const p = entry.payload;
+    foldEntityEvent(holdingsOf(p.fromId), entry, p.fromId);
+    foldEntityEvent(holdingsOf(p.toId), entry, p.toId);
+  }
+
   const APPLY = {
     [GOLD_GRANTED]: applyGoldGranted,
     [ITEMS_GRANTED]: applyItemsGranted,
@@ -371,6 +388,7 @@ export function createEconomyEngine(world, registry) {
     [CRAFT_COMPLETED]: applyCraftCompleted,
     [EQUIP_CHANGED]: applyEquipChanged,
     [ITEM_DROPPED]: applyItemDropped,
+    [ITEMS_TRANSFERRED]: applyItemsTransferred,
   };
 
   // Prime from whatever history the log already holds (cold-start against a
@@ -612,7 +630,28 @@ export function createEconomyEngine(world, registry) {
     return { ok: true, entry };
   }
 
-  // --- thin dispatch-only mutators (seeding, future quest rewards). The
+  // transferItems — one atomic hand-off of stackables between two entities
+  // (the quest engine's delivery verb; there was no player→NPC item motion
+  // before this — TRADE_COMPLETED is strictly player↔shop). Resolves live
+  // (defs, quantities, the giver's holdings) and commits ONE event or
+  // NOTHING, the trade/craft react discipline.
+  function transferItems(fromId, toId, { stacks } = {}, reason) {
+    const fail = (reason_) => ({ ok: false, reason: reason_ });
+    if (!stacks || Object.keys(stacks).length === 0) return fail('nothing to transfer');
+    if (fromId === toId) return fail('cannot transfer to the same entity');
+    const inventory = getInventory(fromId);
+    for (const [defId, qty] of Object.entries(stacks)) {
+      const def = getItemDef(defId);
+      if (!def.stackable) return fail(`${def.name} is not stackable — instance transfer is not supported`);
+      if (!Number.isInteger(qty) || qty <= 0) return fail(`invalid quantity ${qty} for ${def.name}`);
+      const have = inventory.stacks[defId] ?? 0;
+      if (have < qty) return fail(`you have ${have} ${def.name}, not ${qty}`);
+    }
+    const entry = world.dispatch(ITEMS_TRANSFERRED, { fromId, toId, stacks, reason });
+    return { ok: true, entry };
+  }
+
+  // --- thin dispatch-only mutators (seeding, quest rewards). The
   // caller supplies stacks; instance grants mint ids here from nextSeq.
   function grantGold(entityId, amount, reason) {
     return world.dispatch(GOLD_GRANTED, { entityId, amount, reason });
@@ -655,6 +694,7 @@ export function createEconomyEngine(world, registry) {
     craft,
     equip,
     drop,
+    transferItems,
     grantGold,
     grantItems,
     rebuildGold,

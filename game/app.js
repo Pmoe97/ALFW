@@ -19,6 +19,7 @@ import { createFactionEngine } from '../engines/factionEngine.js';
 import { createNpcGeneratorEngine, deriveScheduleState } from '../engines/npcGeneratorEngine.js';
 import { createTravelEngine } from '../engines/travelEngine.js';
 import { createEconomyEngine } from '../engines/economyEngine.js';
+import { createQuestEngine } from '../engines/questEngine.js';
 import { createTickSource } from './tickSource.js';
 import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from '../actions/playerActions.js';
 import { getDialogue } from '../ai/getDialogue.js';
@@ -47,6 +48,12 @@ createMemoryEngine(world, registry, presence);
 
 const travel = createTravelEngine(world, map, poi);
 const economy = createEconomyEngine(world, registry);
+// The quest engine dispatches through the engines above (POI injection on
+// accept, economy/relationship/faction rewards on turn-in), so it is
+// constructed last, with all of them live.
+const quests = createQuestEngine(world, {
+  playerId: rowan.id, economy, relationships, faction, poi, travel,
+});
 const config = world.getState().config;
 const tick = createTickSource(world, config);
 
@@ -81,7 +88,7 @@ const ctx = {
   npc: mira,
   merchant: sable,
   merchantShopRef,
-  engines: { map, poi, clock, faction, npcGen, travel, relationships, conversationHistory, races, registry, economy },
+  engines: { map, poi, clock, faction, npcGen, travel, relationships, conversationHistory, races, registry, economy, quests },
   actions: {
     startDialogue,
     endDialogue,
@@ -94,6 +101,12 @@ const ctx = {
     dropItem: (items) => economy.drop(rowan.id, items),
     confirmTrade: (offer) => economy.trade(rowan.id, merchantShopRef, offer),
     craftRecipe: (stationId, recipeId) => economy.craft(rowan.id, stationId, recipeId),
+    // Quest verbs — same thin-arrow shape. Accept/turn-in are location-gated
+    // inside the engine (the guild board is a place); the Journal disables
+    // the buttons on the same read, so a rejection here is belt-and-braces.
+    acceptQuest: (questId) => quests.acceptQuest(questId),
+    turnInQuest: (questId) => quests.completeQuest(questId),
+    abandonQuest: (questId) => quests.abandonQuest(questId),
   },
   getDialogue,
   knownNpcIds: [mira.id, sable.id],
