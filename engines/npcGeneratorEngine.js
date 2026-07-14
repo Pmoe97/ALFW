@@ -42,6 +42,7 @@ import { mulberry32 } from '../worldState.js';
 import { hashCoords, mapSeed } from './worldMapEngine.js';
 import { weightedPick, deriveBaselinePois } from './poiEngine.js';
 import { deriveTimeOfDayBucket } from './worldClockEngine.js';
+import { getSchemaDiff, resolveFieldList, resolveFieldValue } from '../entities/fieldSchema.js';
 import {
   createNpc,
   PRIMARY_SKILL_ATTRIBUTE,
@@ -87,7 +88,10 @@ function nodeKeys(node) {
 // settings level without touching code. Keys of BASE_APPEARANCE_POOLS are the
 // same dot-paths appearanceOverrides uses.
 
-const BASE_APPEARANCE_POOLS = Object.freeze({
+// Exported (module-local until the creation wizard needed the defaults): the
+// wizard passes these to entities/fieldSchema.js as the `default` argument so it
+// renders off the same pools the generator draws from, without duplicating them.
+export const BASE_APPEARANCE_POOLS = Object.freeze({
   heightBuild: ['short and slight', 'average height, lean build', 'average height, sturdy build', 'tall and broad-shouldered', 'tall and lean', 'compact and muscular'],
   'hair.color': ['black', 'dark brown', 'chestnut', 'auburn', 'sandy blond', 'ash grey', 'copper red'],
   'hair.style': ['loose', 'braided', 'tied back', 'cropped close', 'pinned up', 'wind-tangled'],
@@ -111,9 +115,9 @@ const BASE_APPEARANCE_POOLS = Object.freeze({
 // The fixed appearance draw order — Appearance schema order. Part of the
 // determinism contract: reordering this list would reroll every future NPC's
 // look (already-committed NPCs are birth snapshots and cannot be touched).
-const APPEARANCE_FIELD_ORDER = Object.freeze(Object.keys(BASE_APPEARANCE_POOLS));
+export const APPEARANCE_FIELD_ORDER = Object.freeze(Object.keys(BASE_APPEARANCE_POOLS));
 
-const DISTINGUISHING_FEATURES = Object.freeze(['a thin scar across one eyebrow', 'a missing half-finger on the left hand', 'a tattoo of a local charm on the wrist', 'ink-stained fingertips', 'a chipped front tooth', 'a burn scar on one forearm', 'a birthmark at the collarbone', 'ears pierced with simple studs']);
+export const DISTINGUISHING_FEATURES = Object.freeze(['a thin scar across one eyebrow', 'a missing half-finger on the left hand', 'a tattoo of a local charm on the wrist', 'ink-stained fingertips', 'a chipped front tooth', 'a burn scar on one forearm', 'a birthmark at the collarbone', 'ears pierced with simple studs']);
 // Exported (alongside VOCATION_WORKPLACE_CATEGORY below) so the proof's
 // key-set audit is a true drift-catcher: adding a vocation to either pool
 // without a workplace mapping fails loudly.
@@ -157,19 +161,22 @@ export const VOCATION_WORKPLACE_CATEGORY = Object.freeze({
 // Always-nocturnal vocations; guards additionally roll a shift (one draw in
 // deriveNpc step 15) — half the watch works nights.
 export const NOCTURNAL_VOCATIONS = Object.freeze(['outlaw', 'poacher']);
-const RELATIONSHIP_STATUSES = Object.freeze(['single', 'single', 'married', 'widowed', 'courting']); // single repeated = cheap weighting
-const LIVING_SITUATIONS_SETTLEMENT = Object.freeze(['lives alone in a small home', 'lives with family', 'rents a room above the workplace', 'lives at the edge of the settlement', 'shares a crowded boarding house']);
-const LIVING_SITUATIONS_WILDERNESS = Object.freeze(['camps rough, moving with the seasons', 'keeps a lone cabin off the trails', 'shelters in a cave dug into the hillside', 'lives out of a wagon']);
-const SEXUAL_ORIENTATIONS = Object.freeze([
+// Flavor pools — exported so the creation wizard can offer the same option lists
+// the generator draws from (still code constants, not config; a world retunes
+// them through the fieldSchema diff, never by editing these).
+export const RELATIONSHIP_STATUSES = Object.freeze(['single', 'single', 'married', 'widowed', 'courting']); // single repeated = cheap weighting
+export const LIVING_SITUATIONS_SETTLEMENT = Object.freeze(['lives alone in a small home', 'lives with family', 'rents a room above the workplace', 'lives at the edge of the settlement', 'shares a crowded boarding house']);
+export const LIVING_SITUATIONS_WILDERNESS = Object.freeze(['camps rough, moving with the seasons', 'keeps a lone cabin off the trails', 'shelters in a cave dug into the hillside', 'lives out of a wagon']);
+export const SEXUAL_ORIENTATIONS = Object.freeze([
   { name: 'heterosexual', weight: 6 },
   { name: 'bisexual', weight: 2 },
   { name: 'homosexual', weight: 1 },
   { name: 'asexual', weight: 1 },
 ]);
-const PERSONALITY_TRAITS = Object.freeze(['warm', 'guarded', 'curious', 'blunt', 'patient', 'quick-tempered', 'superstitious', 'pragmatic', 'dryly humorous', 'earnest', 'stubborn', 'easygoing']);
-const HOBBIES = Object.freeze(['whittling', 'card games', 'dice', 'fishing', 'gossip', 'singing', 'gardening', 'collecting odd stones', 'mending', 'charcoal sketches']);
-const LIKES = Object.freeze(['a warm meal', 'fair trade', 'quiet mornings', 'a good story', 'strong drink', 'festival days', 'honest work', 'rainy evenings']);
-const DISLIKES = Object.freeze(['cheats', 'crowds', 'being lied to', 'cold winters', 'debt', 'pushy strangers', 'spoiled food', 'idle hands']);
+export const PERSONALITY_TRAITS = Object.freeze(['warm', 'guarded', 'curious', 'blunt', 'patient', 'quick-tempered', 'superstitious', 'pragmatic', 'dryly humorous', 'earnest', 'stubborn', 'easygoing']);
+export const HOBBIES = Object.freeze(['whittling', 'card games', 'dice', 'fishing', 'gossip', 'singing', 'gardening', 'collecting odd stones', 'mending', 'charcoal sketches']);
+export const LIKES = Object.freeze(['a warm meal', 'fair trade', 'quiet mornings', 'a good story', 'strong drink', 'festival days', 'honest work', 'rainy evenings']);
+export const DISLIKES = Object.freeze(['cheats', 'crowds', 'being lied to', 'cold winters', 'debt', 'pushy strangers', 'spoiled food', 'idle hands']);
 const BASE_VOICE_ACCENTS = Object.freeze([
   { name: 'plain regional burr', signaturePhrases: ['reckon', 'well enough', 'fair to say', "s'pose so", 'mind now'] },
   { name: 'soft rural drawl', signaturePhrases: ['now then', 'bless it', 'sure as anything', 'no bother', 'all the same'] },
@@ -177,8 +184,8 @@ const BASE_VOICE_ACCENTS = Object.freeze([
 ]);
 // speechPattern / voice-tag pools are gone: voice directives now derive from
 // personality axes (entities/voice.js), not from independent flavor rolls.
-const INTIMATE_GENITAL_BY_GENDER = Object.freeze({ female: 'vulva', male: 'penis' });
-const INTIMATE_SHAPE_SIZES = Object.freeze(['petite', 'average', 'generous']);
+export const INTIMATE_GENITAL_BY_GENDER = Object.freeze({ female: 'vulva', male: 'penis' });
+export const INTIMATE_SHAPE_SIZES = Object.freeze(['petite', 'average', 'generous']);
 
 // --- Draw helpers (all consume the one per-NPC rng stream) --------------------
 
@@ -261,10 +268,14 @@ export function deriveNpc(config, node, enabledRaces, i) {
   const relationshipStatus = pick(rng, RELATIONSHIP_STATUSES);
   const livingSituation = pick(rng, kind === 'settlement' ? LIVING_SITUATIONS_SETTLEMENT : LIVING_SITUATIONS_WILDERNESS);
 
-  // 8. appearance — one draw per base field in fixed schema order; each
-  // field's pool is the race's override for that dot-path, else the base pool.
-  // Females skip the facialHair draw ('none', no stream consumption) — a
-  // deterministic branch since gender was drawn above on this same stream.
+  // 8. appearance — one draw per field in the RESOLVED schema order (the world's
+  // fieldSchema diff over the base order/pools; an absent diff is the base order
+  // and base pools verbatim, so shipped generation is byte-identical). Each
+  // field's pool precedence is: race override for that dot-path > world value
+  // override / added-field pool (resolveFieldValue) > base pool. Females skip the
+  // facialHair draw ('none', no stream consumption) — a deterministic branch
+  // since gender was drawn above on this same stream; the storage path is stable
+  // under rename, so this branch survives a relabel of that field.
   const appearance = {
     heightBuild: '',
     hair: { color: '', style: '', length: '', texture: '' },
@@ -275,16 +286,20 @@ export function deriveNpc(config, node, enabledRaces, i) {
     distinguishingFeatures: [],
     intimate: [],
   };
-  for (const path of APPEARANCE_FIELD_ORDER) {
+  const appearanceDiff = getSchemaDiff(config, 'appearance');
+  for (const { path } of resolveFieldList(APPEARANCE_FIELD_ORDER, appearanceDiff)) {
     if (path === 'face.facialHair' && gender === 'female') {
       appearance.face.facialHair = 'none';
       continue;
     }
-    const pool = race.appearanceOverrides[path] ?? BASE_APPEARANCE_POOLS[path];
+    const pool = race.appearanceOverrides[path] ?? resolveFieldValue(path, appearanceDiff, BASE_APPEARANCE_POOLS[path]);
     const value = pick(rng, pool);
     const [head, tail] = path.split('.');
     if (tail === undefined) appearance[head] = value;
-    else appearance[head][tail] = value;
+    else {
+      if (appearance[head] === undefined) appearance[head] = {}; // world-added nested field
+      appearance[head][tail] = value;
+    }
   }
 
   // 9. race extension fields — merged ADDITIVELY onto appearance, one draw per
