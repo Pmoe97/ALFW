@@ -54,12 +54,20 @@ const economy = createEconomyEngine(world, registry);
 const combat = createCombatEngine(world, {
   playerId: rowan.id, registry, map, economy, relationships, faction,
 });
+// Late-bound: economy needs a live combat reference to refuse trade/craft/
+// equip/drop while a fight is open (the belt-and-braces travel's
+// startTravel/startExplore already apply), but economy is necessarily
+// constructed before combat (combat depends on economy). See
+// economyEngine.js's setCombatEngine comment.
+economy.setCombatEngine(combat);
 const travel = createTravelEngine(world, map, poi, combat);
 // The quest engine dispatches through the engines above (POI injection on
 // accept, economy/relationship/faction rewards on turn-in), so it is
-// constructed last, with all of them live.
+// constructed last, with all of them live. It also takes combat directly
+// (no circularity: quests is built after combat) to refuse accept/complete/
+// abandon while a fight is open.
 const quests = createQuestEngine(world, {
-  playerId: rowan.id, economy, relationships, faction, poi, travel,
+  playerId: rowan.id, economy, relationships, faction, poi, travel, combat,
 });
 const config = world.getState().config;
 const tick = createTickSource(world, config);

@@ -32,10 +32,16 @@ const WORLD_CONFIG = {
       traveling: 60,
       chatting: 1,
       exploring: 40,
-      // Combat freezes time: the ×0 multiplier means CLOCK_TICKs during an
-      // open combat contribute zero game-seconds, which also freezes an open
-      // travel leg's elapsed progress — that multiplier IS the mechanism that
-      // gates TRAVEL_ARRIVED behind combat resolution (engines/combatEngine.js).
+      // LOCKED at 0 — a deliberate, permanent design choice (no time
+      // technically passes during a fight), not a placeholder default: the
+      // ×0 multiplier means CLOCK_TICKs while combat's timeContext is active
+      // contribute zero game-seconds to the world clock, which also freezes
+      // an open travel leg's elapsed progress. That multiplier alone is the
+      // whole mechanism that gates TRAVEL_ARRIVED behind combat resolution
+      // (engines/combatEngine.js) — proven by proof.js Section CB (CB3
+      // asserts clock.getTotalGameSeconds() is unchanged across ticks taken
+      // mid-fight). Do not retune this away from 0 without re-deriving the
+      // arrival-gating mechanism it currently provides for free.
       combat: 0,
     },
   },

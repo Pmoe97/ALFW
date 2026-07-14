@@ -3927,6 +3927,7 @@ function runSectionCB(record) {
     const combat = createCombatEngine(fan.world, {
       playerId: fan.rowan.id, registry: fan.registry, map, economy, relationships: fan.relationships, faction,
     });
+    economy.setCombatEngine(combat); // late-bound: see economyEngine.js
     const travel = createTravelEngine(fan.world, map, poi, combat);
     map.materializeNeighbors(travel.getPlayerNodeId());
     return { fan, world: fan.world, rowanId: fan.rowan.id, map, poi, clock, faction, economy, combat, travel };
@@ -4183,6 +4184,54 @@ function runSectionCB(record) {
     record('CB7 PASSED: equipment changes committed combat facts (sword vs fists), and every combat cache equals its from-scratch rebuild mid- and post-fight');
   }
 
+  // --- CB8: non-combat player verbs are refused while a fight is open — the
+  // SAME belt-and-braces travel's startTravel/startExplore already apply
+  // (the UI blocks navigation to these screens during combat, but the engine
+  // must not trust that alone). economy.trade/craft/equip/drop and
+  // quests.acceptQuest/completeQuest/abandonQuest must all return
+  // {ok:false, reason:'a combat is in progress'} while combat.getActiveCombat()
+  // is truthy, and the guard must LIFT once the fight ends — not get stuck.
+  {
+    const w = cbBuild(forceIncident('bandit', 2));
+    const questsCb = createQuestEngine(w.world, {
+      playerId: w.rowanId, economy: w.economy, relationships: w.fan.relationships, faction: w.faction, poi: w.poi, travel: w.travel, combat: w.combat,
+    });
+    cbGiveWeapon(w, 'iron_sword');
+    cbStartTravelLeg(w);
+    assert.ok(w.combat.getActiveCombat(), 'CB8 fixture must open a fight');
+
+    const cbBlocked = 'a combat is in progress';
+    const tradeR = w.economy.trade(w.rowanId, { kind: 'authored', shopId: 'shop_rusted_ledger' }, { buy: [{ defId: 'bread', qty: 1 }] });
+    assert.deepEqual(tradeR, { ok: false, reason: cbBlocked }, 'trade must refuse while a fight is open');
+    const craftR = w.economy.craft(w.rowanId, 'blacksmith', 'bs1');
+    assert.deepEqual(craftR, { ok: false, reason: cbBlocked }, 'craft must refuse while a fight is open');
+    const equipR = w.economy.equip(w.rowanId, 'mainHand', null);
+    assert.deepEqual(equipR, { ok: false, reason: cbBlocked }, 'equip must refuse while a fight is open');
+    const dropR = w.economy.drop(w.rowanId, { stacks: { bread: 1 } });
+    assert.deepEqual(dropR, { ok: false, reason: cbBlocked }, 'drop must refuse while a fight is open');
+    const acceptR = questsCb.acceptQuest('quest_bread_run');
+    assert.deepEqual(acceptR, { ok: false, reason: cbBlocked }, 'quest accept must refuse while a fight is open');
+    const completeR = questsCb.completeQuest('quest_bread_run');
+    assert.deepEqual(completeR, { ok: false, reason: cbBlocked }, 'quest turn-in must refuse while a fight is open');
+    const abandonR = questsCb.abandonQuest('quest_bread_run');
+    assert.deepEqual(abandonR, { ok: false, reason: cbBlocked }, 'quest abandon must refuse while a fight is open');
+
+    // None of the refused calls dispatched anything.
+    const logLenBlocked = w.world.getEventLog().length;
+
+    // Resolve the fight, then confirm the guard LIFTS — the same verb that
+    // was refused now goes through cleanly.
+    for (let i = 0; w.combat.getActiveCombat() && i < 60; i++) {
+      const en = cbFirstLiveEnemy(w.combat);
+      w.combat.act(en ? { type: 'attackLethal', targetId: en.id } : { type: 'wait' });
+    }
+    assert.ok(!w.combat.getActiveCombat(), 'the fight must end for the guard-lift check to be meaningful');
+    assert.ok(w.world.getEventLog().length > logLenBlocked, 'the fight itself did dispatch events after the refused calls');
+    const equipAfter = w.economy.equip(w.rowanId, 'mainHand', null);
+    assert.ok(equipAfter.ok, 'equip succeeds again once combat has ended — the guard is not permanently stuck');
+    record('CB8 PASSED: trade/craft/equip/drop and quest accept/complete/abandon all refuse with a consistent reason while a fight is open, and the guard lifts cleanly once combat ends');
+  }
+
   return { log: cbBuild(forceIncident('bandit', 2)).world.getEventLog() };
 }
 
@@ -4263,9 +4312,10 @@ function slWireEngines(fan) {
   const combat = createCombatEngine(fan.world, {
     playerId: fan.rowan.id, registry: fan.registry, map, economy, relationships: fan.relationships, faction,
   });
+  economy.setCombatEngine(combat); // late-bound: see economyEngine.js
   const travel = createTravelEngine(fan.world, map, poi, combat);
   const quests = createQuestEngine(fan.world, {
-    playerId: fan.rowan.id, economy, relationships: fan.relationships, faction, poi, travel,
+    playerId: fan.rowan.id, economy, relationships: fan.relationships, faction, poi, travel, combat,
   });
   return { effects, map, poi, faction, npcGen, memory, clock, travel, economy, combat, quests };
 }
