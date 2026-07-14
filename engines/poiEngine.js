@@ -81,6 +81,21 @@ export function nodeKeys(node) {
   return { kx: Math.round(node.x * 1000), ky: Math.round(node.y * 1000) };
 }
 
+// hashString — a stable 32-bit FNV-1a hash of a string, returned as an
+// unsigned int. Used to turn a POI's own content-stable id into a
+// deterministic integer salt for RNG streams that need to decorrelate per-POI
+// without depending on the POI's position in a pool array (economyEngine's
+// shop-stock seeding is the current consumer). Exported so that caller derives
+// its salt from the SAME hash rather than a parallel reimplementation.
+export function hashString(str) {
+  let h = 2166136261; // FNV-1a 32-bit offset basis
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619); // FNV-1a 32-bit prime
+  }
+  return h >>> 0;
+}
+
 // weightedPick — weighted choice over an array of { name, weight }, using a
 // single [0,1) draw `r`. It iterates the array in the order given, so the pick is
 // only as deterministic as that order: callers pass a stably-ordered array —
@@ -139,6 +154,25 @@ function poolSizeFor(poi, classification) {
   return Math.max(0, Math.min(w.maxPoolSize, Math.round(raw)));
 }
 
+// idFor — a CONTENT-STABLE id for a baseline POI: a hash of the node id plus
+// the POI's own rolled content (category/prominence/hidden), not its index in
+// the pool array. This is deliberate: `i` is only a stream-position input to
+// the RNG draw below, never identity. If a future config/schema change resizes
+// or reorders a node's pool, an already-discovered POI's id then either still
+// resolves (the SAME content was rolled again) or simply has no match in the
+// re-derived pool (fails closed) — it can never silently resolve to a
+// DIFFERENT POI that happens to now sit at the old positional index. Collision
+// note: with only {category, prominence, hidden} as content, two POIs at the
+// same node could in principle roll identical content and collide on id; given
+// prominence is a continuous draw from a 32-bit PRNG stream this is
+// astronomically unlikely in practice, and would need richer POI content to
+// rule out structurally — out of scope for this pass (see the `data: {}`
+// placeholder below).
+function idFor(node, category, prominence, hidden) {
+  const key = `${node.id}|${category}|${prominence}|${hidden}`;
+  return `poi_${node.id}_c${hashString(key).toString(36)}`;
+}
+
 // deriveBaselinePois — PURE. The finite baseline POI stub list for a node, a
 // function of (config, seed, node.x, node.y, node.classification) ALONE. Each
 // index i seeds a fresh mulberry32 from (seed, POI_POOL_SALT + i, kx, ky) and
@@ -161,7 +195,7 @@ export function deriveBaselinePois(config, node) {
     const prominence = rng();
     const hidden = rng() < poi.hiddenChance;
     pois.push({
-      id: `poi_${node.id}_b${i}`,
+      id: idFor(node, category, prominence, hidden),
       nodeId: node.id,
       category,
       source: 'baseline',
