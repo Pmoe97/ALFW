@@ -17,6 +17,7 @@ import { clearEl, div, button } from './ui/dom.js';
 import { FONT_HEAD, FONT_BODY, secondaryActionButtonStyle, primaryActionButtonStyle, panelStyle } from './ui/styles.js';
 import { renderMainMenu } from './ui/screens/mainMenu.js';
 import { renderWorldConfigEditor } from './ui/screens/worldConfigEditor.js';
+import { renderCreation, initCreation } from './ui/screens/creation.js';
 import { buildLiveGame } from './liveGame.js';
 import { WORLD_CONFIG } from './sampleWorld.js';
 import { createPersistence } from './persistence.js';
@@ -37,8 +38,11 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     state,
     setState,
     hasSaves: () => persistence.listSaves().length > 0,
-    // A fresh run — optionally from a named preset's config (Character Creation
-    // and the WorldConfig editor both start games this way).
+    // New Game opens the Character Creation wizard; the wizard's Finish calls
+    // newGame(config) with the assembled run config (preset + seed + options +
+    // playerCharacter). The WorldConfig editor's "start from preset" also calls
+    // newGame(config) directly, skipping creation.
+    startCreation: () => { state.creation = initCreation(shell); setState({ phase: 'creation' }); },
     newGame: (config) => enterPlay(buildLiveGame({ config })),
     continueGame: () => setState({ phase: 'continue' }),
     openWorldConfig: () => {
@@ -66,6 +70,7 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     applyTheme(host, state.theme);
     mountPoint.appendChild(host);
     if (state.phase === 'worldConfig') host.appendChild(renderWorldConfigEditor(shell));
+    else if (state.phase === 'creation') host.appendChild(renderCreation(shell));
     else if (state.phase === 'continue') host.appendChild(renderContinue());
     else host.appendChild(renderMainMenu(shell));
   }

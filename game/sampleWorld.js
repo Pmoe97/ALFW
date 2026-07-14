@@ -377,7 +377,8 @@ export function buildSampleWorld({ save, config } = {}) {
   // Config precedence: a save replays under its OWN embedded config; a fresh run
   // started from a named preset uses that preset's config; otherwise the shipped
   // default. A preset only reshapes a NEW world — never an existing save.
-  const world = createWorldState(save?.config ?? config ?? WORLD_CONFIG, save?.eventLog ?? []);
+  const effectiveConfig = save?.config ?? config ?? WORLD_CONFIG;
+  const world = createWorldState(effectiveConfig, save?.eventLog ?? []);
 
   // The live race registry (settings surface). Constructed first — before any
   // dispatches — because its RACE_* subscriptions must not miss an edit event
@@ -519,6 +520,21 @@ export function buildSampleWorld({ save, config } = {}) {
     },
     inventory: [],
   });
+
+  // Character Creation delivers the player as effectiveConfig.playerCharacter
+  // (carried IN the config so it is embedded in a save and re-applied identically
+  // on load). It reskins the registered player slot in place — keeping the id
+  // `player_rowan` so every seed that references it (starting gold, the Mira
+  // relationship, combat/quest playerId) stays wired — while replacing the
+  // authored identity/appearance/psychology/capabilities with the created ones.
+  const pc = effectiveConfig.playerCharacter;
+  if (pc) {
+    if (pc.identity) rowan.identity = { ...rowan.identity, ...structuredClone(pc.identity) };
+    if (pc.appearance) rowan.appearance = structuredClone(pc.appearance);
+    if (pc.psychology) rowan.psychology = { ...structuredClone(pc.psychology), memories: rowan.psychology.memories ?? [] };
+    if (pc.capabilities) rowan.capabilities = structuredClone(pc.capabilities);
+    if (pc.playerData) rowan.playerData = { ...(rowan.playerData ?? {}), ...structuredClone(pc.playerData) };
+  }
 
   const sable = createNpc({
     id: 'npc_sable', // proprietor of the Rusted Ledger, Mira's oldest friend and quietest grudge

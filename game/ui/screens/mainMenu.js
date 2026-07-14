@@ -29,7 +29,7 @@ export function renderMainMenu(shell) {
 
   const buttons = div('display:flex; flex-direction:column; gap:10px; align-items:center; margin-top:28px;', {
     children: [
-      menuBtn('New Game', () => shell.newGame(), { primary: true }),
+      menuBtn('New Game', () => shell.startCreation(), { primary: true }),
       menuBtn(
         hasSaves ? 'Continue' : 'Continue (no saves yet)',
         () => hasSaves && shell.continueGame(),
