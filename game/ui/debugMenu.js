@@ -40,6 +40,7 @@ export function renderDebugMenu(ui) {
 
   panel.append(
     navSection(ui),
+    sessionSection(ui),
     poiSection(ui),
     factionSection(ui),
     presenceSection(ui),
@@ -48,6 +49,28 @@ export function renderDebugMenu(ui) {
     clockSection(ui),
   );
   return panel;
+}
+
+// ---- Session: save / quit to menu (wired by the shell via ctx.session) ------
+function sessionSection(ui) {
+  const session = ui.ctx.session;
+  const s = div(SECTION);
+  s.appendChild(div(H, { text: 'Session — save · quit to menu' }));
+  if (!session) {
+    s.appendChild(span('color:#666;', { text: '(no session — not launched via the shell)' }));
+    return s;
+  }
+  const row = div('display:flex; flex-wrap:wrap; align-items:center; gap:6px;');
+  row.appendChild(button(ui.state.savedNote || 'Save game', CHIP, () => {
+    const name = session.save();
+    ui.setState({ savedNote: `Saved: ${name}` });
+  }));
+  row.appendChild(button('Quit to menu', CHIP, () => session.quitToMenu()));
+  s.appendChild(row);
+  if (!session.isPersistent?.()) {
+    s.appendChild(span('color:#a66; font-size:10px; display:block; margin-top:4px;', { text: 'Storage unavailable — saves will not survive a reload.' }));
+  }
+  return s;
 }
 
 // ---- 1) Navigation / preview switchers ------------------------------------
