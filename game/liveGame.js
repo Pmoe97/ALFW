@@ -26,6 +26,7 @@ import { createQuestEngine } from '../engines/questEngine.js';
 import { createTickSource } from './tickSource.js';
 import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from '../actions/playerActions.js';
 import { getDialogue } from '../ai/getDialogue.js';
+import { createTutorial } from './tutorial.js';
 
 // buildLiveGame({ save }) — construct a runnable game. The engine construction
 // order is canonical and load-bearing (map → poi → clock → faction/npc → memory →
@@ -118,6 +119,13 @@ export function buildLiveGame({ save, config: presetConfig } = {}) {
     knownNpcIds: [mira.id, sable.id],
     materializedNodeIds,
   };
+
+  // Isekai runs get a first-fight tutorial (started when the walkthrough is
+  // dismissed). Non-isekai runs (editor "start from preset", loaded saves) have
+  // no tutorial. The controller is no-fail — see game/tutorial.js.
+  if (config.startTier) {
+    ctx.tutorial = createTutorial({ world, combat, map, travel, economy, playerId: rowan.id });
+  }
 
   return { world, config, ctx, tick };
 }

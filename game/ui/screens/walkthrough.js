@@ -24,6 +24,14 @@ export function renderWalkthrough(ui) {
   const step = STEPS[i];
   const last = i === STEPS.length - 1;
 
+  // Dismissing the walkthrough (Begin or Skip) opens the first-fight tutorial on
+  // isekai runs; a no-op otherwise.
+  const dismiss = () => {
+    setState({ walkthroughActive: false });
+    ui.ctx.tutorial?.start();
+    setState({}); // re-render so the tutorial fight's combat screen shows at once
+  };
+
   const dots = div('display:flex; gap:5px; justify-content:center;', {
     children: STEPS.map((_, k) =>
       span(`width:7px; height:7px; border-radius:50%; background:${k === i ? 'var(--accent)' : 'var(--border-strong)'};`)),
@@ -39,9 +47,9 @@ export function renderWalkthrough(ui) {
         dots,
         div('display:flex; justify-content:space-between; align-items:center; margin-top:4px;', {
           children: [
-            button('Skip', secondaryActionButtonStyle(), () => setState({ walkthroughActive: false })),
+            button('Skip', secondaryActionButtonStyle(), dismiss),
             button(last ? 'Begin' : 'Next', primaryActionButtonStyle() + ' padding:10px 20px;',
-              () => (last ? setState({ walkthroughActive: false }) : setState({ walkthroughStep: i + 1 }))),
+              () => (last ? dismiss() : setState({ walkthroughStep: i + 1 }))),
           ],
         }),
       ],
