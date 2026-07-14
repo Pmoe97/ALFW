@@ -675,12 +675,14 @@ export function createEconomyEngine(world, registry) {
     return { ok: true, entry };
   }
 
-  // transferItems — one atomic hand-off of stackables between two entities
-  // (the quest engine's delivery verb; there was no player→NPC item motion
-  // before this — TRADE_COMPLETED is strictly player↔shop). Resolves live
-  // (defs, quantities, the giver's holdings) and commits ONE event or
-  // NOTHING, the trade/craft react discipline.
-  function transferItems(fromId, toId, { stacks } = {}, reason) {
+  // resolveTransferItems — PURE validation + event construction, no dispatch.
+  // transferItems below is just this plus the commit. Exposed separately so a
+  // composite action (questEngine's completeQuest) can build its full event
+  // list up front and submit it as one world.dispatchBatch — see that
+  // module's header for why front-loaded validation replaces a rollback
+  // system. Returns { ok: false, reason } or { ok: true, event: { type,
+  // payload } }.
+  function resolveTransferItems(fromId, toId, { stacks } = {}, reason) {
     const fail = (reason_) => ({ ok: false, reason: reason_ });
     if (!stacks || Object.keys(stacks).length === 0) return fail('nothing to transfer');
     if (fromId === toId) return fail('cannot transfer to the same entity');
@@ -692,27 +694,50 @@ export function createEconomyEngine(world, registry) {
       const have = inventory.stacks[defId] ?? 0;
       if (have < qty) return fail(`you have ${have} ${def.name}, not ${qty}`);
     }
-    const entry = world.dispatch(ITEMS_TRANSFERRED, { fromId, toId, stacks, reason });
+    return { ok: true, event: { type: ITEMS_TRANSFERRED, payload: { fromId, toId, stacks, reason } } };
+  }
+
+  // transferItems — one atomic hand-off of stackables between two entities
+  // (the quest engine's delivery verb; there was no player→NPC item motion
+  // before this — TRADE_COMPLETED is strictly player↔shop). Resolves live
+  // (defs, quantities, the giver's holdings) and commits ONE event or
+  // NOTHING, the trade/craft react discipline.
+  function transferItems(fromId, toId, offer, reason) {
+    const resolved = resolveTransferItems(fromId, toId, offer, reason);
+    if (!resolved.ok) return resolved;
+    const entry = world.dispatch(resolved.event.type, resolved.event.payload);
     return { ok: true, entry };
   }
 
   // --- thin dispatch-only mutators (seeding, quest rewards). The
   // caller supplies stacks; instance grants mint ids here from nextSeq.
-  function grantGold(entityId, amount, reason) {
-    return world.dispatch(GOLD_GRANTED, { entityId, amount, reason });
+  // Each has a resolve* twin (event construction, no dispatch) for the same
+  // build-then-dispatchBatch reason as resolveTransferItems above.
+  function resolveGrantGold(entityId, amount, reason) {
+    return { type: GOLD_GRANTED, payload: { entityId, amount, reason } };
   }
 
-  function grantItems(entityId, { stacks, instanceDefIds } = {}, reason) {
+  function grantGold(entityId, amount, reason) {
+    const event = resolveGrantGold(entityId, amount, reason);
+    return world.dispatch(event.type, event.payload);
+  }
+
+  function resolveGrantItems(entityId, { stacks, instanceDefIds } = {}, reason) {
     const payload = { entityId, reason };
     if (stacks && Object.keys(stacks).length > 0) payload.stacks = stacks;
     if (instanceDefIds && instanceDefIds.length > 0) {
       const nextSeq = world.getEventLog().length;
       payload.instances = instanceDefIds.map((defId, k) => {
-        getItemDef(defId); // validate before committing
+        getItemDef(defId); // validate before committing (throws on an unknown id)
         return { instanceId: `itm_${nextSeq}_${k}`, itemDefId: defId, properties: {} };
       });
     }
-    return world.dispatch(ITEMS_GRANTED, payload);
+    return { type: ITEMS_GRANTED, payload };
+  }
+
+  function grantItems(entityId, opts, reason) {
+    const event = resolveGrantItems(entityId, opts, reason);
+    return world.dispatch(event.type, event.payload);
   }
 
   // --- rebuild proofs: recompute from the log alone, ignoring every cache.
@@ -742,6 +767,9 @@ export function createEconomyEngine(world, registry) {
     transferItems,
     grantGold,
     grantItems,
+    resolveTransferItems,
+    resolveGrantGold,
+    resolveGrantItems,
     rebuildGold,
     rebuildInventory,
     rebuildEquipped,

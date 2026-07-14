@@ -615,39 +615,59 @@ export function createCombatEngine(world, { playerId, registry, map, economy, re
 
     const result = resolveRound(config, active, playerId, playerAction, rng);
 
+    // Build the full list of resultant events before dispatching any of them
+    // — an in-combat item use, then the round, then (if the fight ended)
+    // loot + consequences + COMBAT_ENDED last — and commit them in ONE
+    // world.dispatchBatch call, the completeQuest discipline (see
+    // worldState.js's dispatchBatch): a failure anywhere in the build leaves
+    // the log untouched instead of stranding an already-committed round with
+    // no COMBAT_ENDED ever closing it out.
+    const events = [];
+
     // An in-combat item use is its own ITEM_CONSUMED (economy decrements the
-    // stack; combat folds the interim hp), dispatched BEFORE the round event
-    // so the round's authoritative hpAfter folds last.
+    // stack; combat folds the interim hp), ordered BEFORE the round event so
+    // the round's authoritative hpAfter folds last.
     if (result.itemUse) {
-      world.dispatch(ITEM_CONSUMED, {
-        entityId: playerId,
-        stacks: { [result.itemUse.defId]: 1 },
-        effect: { healed: result.itemUse.healed, hpBefore: result.itemUse.hpBefore, hpAfter: result.itemUse.hpAfter },
-        combatId: active.combatId,
-        reason: active.combatId,
+      events.push({
+        type: ITEM_CONSUMED,
+        payload: {
+          entityId: playerId,
+          stacks: { [result.itemUse.defId]: 1 },
+          effect: { healed: result.itemUse.healed, hpBefore: result.itemUse.hpBefore, hpAfter: result.itemUse.hpAfter },
+          combatId: active.combatId,
+          reason: active.combatId,
+        },
       });
     }
 
-    const entry = world.dispatch(COMBAT_ROUND_RESOLVED, {
-      combatId: active.combatId,
-      round: active.round,
-      actions: result.actions,
-      hpAfter: result.hpAfter,
-      statusAfter: result.statusAfter,
+    events.push({
+      type: COMBAT_ROUND_RESOLVED,
+      payload: {
+        combatId: active.combatId,
+        round: active.round,
+        actions: result.actions,
+        hpAfter: result.hpAfter,
+        statusAfter: result.statusAfter,
+      },
     });
 
     if (result.ended) {
-      finishCombat(active, result);
+      events.push(...resolveFinishCombat(active, result));
     }
+
+    const entries = world.dispatchBatch(events);
+    const entry = entries.find((e) => e.type === COMBAT_ROUND_RESOLVED);
     return { ok: true, entry, ended: result.ended, outcome: result.outcome };
   }
 
-  // finishCombat — grant loot + apply template consequences, THEN dispatch
-  // COMBAT_ENDED last (the questEngine "status fact commits last" ordering; all
-  // inside act's synchronous call, so no save can interleave). timeContext
-  // hands time back: 'traveling' resumes a travel leg (which then arrives),
-  // 'idle' for a scripted fight.
-  function finishCombat(active, result) {
+  // resolveFinishCombat — PURE event construction, no dispatch: loot grants +
+  // template consequences, THEN COMBAT_ENDED last (the questEngine "status
+  // fact commits last" ordering, preserved here as "COMBAT_ENDED is the last
+  // element"). Appended to act()'s batch rather than dispatched directly.
+  // timeContext hands time back: 'traveling' resumes a travel leg (which then
+  // arrives), 'idle' for a scripted fight.
+  function resolveFinishCombat(active, result) {
+    const events = [];
     const rounds = active.round + 1;
     const finalStatuses = { ...result.statusAfter };
     const fromTravel = active.source?.kind === 'travelIncident';
@@ -663,43 +683,49 @@ export function createCombatEngine(world, { playerId, registry, map, economy, re
         gold += c.loot.gold;
         for (const [defId, qty] of Object.entries(c.loot.stacks)) stacks[defId] = (stacks[defId] ?? 0) + qty;
       }
-      if (gold > 0) economy.grantGold(playerId, gold, active.combatId);
-      if (Object.keys(stacks).length > 0) economy.grantItems(playerId, { stacks }, active.combatId);
+      if (gold > 0) events.push(economy.resolveGrantGold(playerId, gold, active.combatId));
+      if (Object.keys(stacks).length > 0) events.push(economy.resolveGrantItems(playerId, { stacks }, active.combatId));
 
-      applyConsequences(template, result.mode, active);
+      events.push(...resolveConsequences(template, result.mode, active));
     }
 
-    world.dispatch(COMBAT_ENDED, {
-      combatId: active.combatId,
-      outcome: result.outcome,
-      mode: result.mode ?? null,
-      rounds,
-      finalStatuses,
-      timeContext: fromTravel ? TRAVEL_TIME_CONTEXT : IDLE_TIME_CONTEXT,
+    events.push({
+      type: COMBAT_ENDED,
+      payload: {
+        combatId: active.combatId,
+        outcome: result.outcome,
+        mode: result.mode ?? null,
+        rounds,
+        finalStatuses,
+        timeContext: fromTravel ? TRAVEL_TIME_CONTEXT : IDLE_TIME_CONTEXT,
+      },
     });
+    return events;
   }
 
-  // applyConsequences — dispatch a template's outcome consequences through the
-  // REAL relationship/faction systems. $player/$enemyN placeholders resolve to
-  // real, persistent combatant ids.
-  function applyConsequences(template, mode, active) {
+  // resolveConsequences — PURE event construction for a template's outcome
+  // consequences through the REAL relationship/faction event shapes.
+  // $player/$enemyN placeholders resolve to real, persistent combatant ids.
+  function resolveConsequences(template, mode, active) {
     const list = mode === 'nonlethal'
       ? template.consequences?.onVictoryNonlethal
       : template.consequences?.onVictoryLethal;
-    if (!list) return;
+    if (!list) return [];
     const resolveId = (token) => {
       if (token === '$player') return playerId;
       const m = /^\$enemy(\d+)$/.exec(token);
       if (m) return active.combatants.filter((c) => c.side === 'enemy')[Number(m[1])]?.id ?? token;
       return token;
     };
+    const events = [];
     for (const cons of list) {
       if (cons.kind === 'relationship') {
-        relationships.recordRelationshipEvent(resolveId(cons.fromId), resolveId(cons.toId), cons.axis, cons.delta);
+        events.push(relationships.resolveRelationshipEvent(resolveId(cons.fromId), resolveId(cons.toId), cons.axis, cons.delta));
       } else if (cons.kind === 'factionControl') {
-        faction.setFactionControl(cons.settlementId, cons.factionId);
+        events.push(faction.resolveFactionControlChange(cons.settlementId, cons.factionId));
       }
     }
+    return events;
   }
 
   // consumeItem — out-of-combat heal (the general consumable channel). One

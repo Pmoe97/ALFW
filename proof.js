@@ -4865,6 +4865,159 @@ console.log('SL18 PASSED: an in-progress combat round-trips (open fight, hp, sta
 
 console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read (inventory, gold, shop stock, quest state, and an in-progress combat included) matches the original exactly');
 
+// --- Section DP: dispatch entry-point guards (undefined-payload guard +
+// transactional dispatchBatch) -----------------------------------------------
+console.log('\n=== Section DP: dispatch entry-point guards (undefined-payload guard + transactional dispatchBatch) ===');
+
+const dpMinimalConfig = { worldName: 'dp', startDateTime: '2024-01-01T00:00:00Z', rngSeed: 1 };
+
+// --- DP1: the undefined-payload guard — JSON.stringify silently drops any
+// object key whose value is `undefined` (a save would corrupt silently on
+// reload), so dispatch must throw loudly instead, at every nesting depth,
+// naming the event type and the offending path. A key that is simply ABSENT
+// (the actions/playerActions.js nodeId pattern) must keep working untouched.
+{
+  const dp1 = createWorldState(dpMinimalConfig);
+  const lenBefore = dp1.getEventLog().length;
+
+  assert.throws(
+    () => dp1.dispatch('DP_TEST', { a: 1, hpAfter: undefined }),
+    /DP_TEST.*payload\.hpAfter/,
+    'a top-level undefined value must throw, naming the event type and the key'
+  );
+  assert.throws(
+    () => dp1.dispatch('DP_TEST', { nested: { deep: { hp: undefined } } }),
+    /payload\.nested\.deep\.hp/,
+    'an undefined value nested inside objects must throw with the full path'
+  );
+  assert.throws(
+    () => dp1.dispatch('DP_TEST', { items: [{ id: 'a' }, { id: undefined }] }),
+    /payload\.items\[1\]\.id/,
+    'an undefined value inside an array element must throw with its index in the path'
+  );
+  assert.equal(dp1.getEventLog().length, lenBefore, 'every rejected dispatch appended NOTHING — a bad dispatch never reaches persistence');
+
+  const ok = dp1.dispatch('DP_TEST', { a: 1 });
+  assert.equal(ok.type, 'DP_TEST');
+  assert.deepEqual(ok.payload, { a: 1 }, 'an omitted key is untouched — omission is not the bug undefined is');
+  console.log('DP1 PASSED: the dispatch entry-point guard throws on an explicit undefined at any depth (top-level, nested object, array element), names the event type and path, and appends nothing; omitting a key still dispatches cleanly');
+}
+
+// --- DP2: dispatchBatch is transactional at the dispatch-channel level — a
+// batch with one bad event partway through throws before ANYTHING in it (not
+// even the individually-valid events before it) is appended, and before any
+// subscriber sees any of it. A fully-valid batch commits every event with
+// contiguous seqs and notifies subscribers only after the whole batch lands.
+{
+  const dp2 = createWorldState(dpMinimalConfig);
+  let notified = 0;
+  dp2.subscribe('DP_A', () => { notified += 1; });
+  dp2.subscribe('DP_B', () => { notified += 1; });
+  const lenBefore = dp2.getEventLog().length;
+
+  assert.throws(
+    () => dp2.dispatchBatch([
+      { type: 'DP_A', payload: { ok: 1 } },
+      { type: 'DP_B', payload: { bad: undefined } },
+      { type: 'DP_A', payload: { ok: 2 } },
+    ]),
+    /DP_B.*payload\.bad/,
+    'a batch with a bad event partway through must throw, identifying it'
+  );
+  assert.equal(dp2.getEventLog().length, lenBefore, 'ZERO events from the failed batch reached the log — including the two individually-valid ones either side of the bad one');
+  assert.equal(notified, 0, 'no subscriber was notified for a batch that failed validation');
+
+  const entries = dp2.dispatchBatch([
+    { type: 'DP_A', payload: { ok: 1 } },
+    { type: 'DP_B', payload: { ok: 2 } },
+  ]);
+  assert.equal(entries.length, 2, 'a fully-valid batch commits every event');
+  assert.deepEqual(entries.map((e) => e.seq), [lenBefore, lenBefore + 1], 'batch entries get contiguous sequential seqs, continuing the log');
+  assert.equal(notified, 2, 'subscribers are notified for every committed event, only after the whole batch is appended');
+  console.log('DP2 PASSED: dispatchBatch is all-or-nothing — a bad event partway through a batch throws with zero events appended and zero subscribers notified; a fully-valid batch commits every event with contiguous seqs');
+}
+
+// --- DP3: the real failure mode the quest/combat refactors guard against —
+// a multi-event "quest completion"-shaped sequence (an item delivery, a gold
+// grant, then a reward grant referencing an INVALID item id) forces a
+// failure partway through. Because completeQuest (engines/questEngine.js)
+// and combatEngine's act/finishCombat build their FULL event list — via each
+// engine's resolve* builders, which construct an event but never dispatch —
+// before calling dispatchBatch even once, the invalid id crashes the grant
+// step during that build, before dispatchBatch is ever invoked, and the
+// earlier, perfectly-valid, already-RESOLVED events (the transfer, the gold
+// grant) never touch the log. Zero events from the interrupted batch land —
+// no partial, un-rollback-able rewards baked into the log.
+{
+  const dp3 = buildSampleWorld();
+  const dpEconomy = createEconomyEngine(dp3.world, dp3.registry);
+  const rowanId = dp3.rowan.id;
+  const lenBefore = dp3.world.getEventLog().length;
+  const breadBefore = dpEconomy.getInventory(rowanId).stacks.bread ?? 0;
+  const goldBefore = dpEconomy.getGold(rowanId);
+
+  const events = [];
+  const transfer = dpEconomy.resolveTransferItems(rowanId, 'npc_mira', { stacks: { bread: 1 } }, 'dp_test');
+  assert.ok(transfer.ok, `the delivery step must itself resolve cleanly (${transfer.reason ?? ''})`);
+  events.push(transfer.event);
+  events.push(dpEconomy.resolveGrantGold(rowanId, 10, 'dp_test'));
+
+  assert.throws(
+    () => events.push(dpEconomy.resolveGrantItems(rowanId, { instanceDefIds: ['not_a_real_item'] }, 'dp_test')),
+    /Unknown item definition "not_a_real_item"/,
+    'an invalid item id crashes the grant step during event construction — exactly the bug a broken reward table would trigger'
+  );
+  assert.equal(events.length, 2, 'only the two events built before the crash exist as plain objects — dispatchBatch was never even reached');
+  assert.equal(dp3.world.getEventLog().length, lenBefore, 'the earlier-built transfer and gold-grant events were NEVER dispatched — zero events from the interrupted batch reached the log');
+  assert.equal(dpEconomy.getInventory(rowanId).stacks.bread ?? 0, breadBefore, 'the resolved-but-never-dispatched transfer moved no items (resolve is pure — it never dispatches)');
+  assert.equal(dpEconomy.getGold(rowanId), goldBefore, 'the resolved-but-never-dispatched gold grant paid no gold');
+
+  // If a caller assembled the same broken sequence as ALREADY-CONSTRUCTED raw
+  // events and handed them to dispatchBatch directly (skipping the resolve
+  // step), dispatchBatch's own all-or-nothing commit still guarantees zero
+  // partial application, independent of where the invalid content came from.
+  events.push({ type: 'ITEMS_GRANTED', payload: { entityId: rowanId, reason: 'dp_test' } }); // stand-in 3rd event
+  const batchLenBefore = dp3.world.getEventLog().length;
+  const committed = dp3.world.dispatchBatch(events);
+  assert.equal(committed.length, 3, 'once every event in a batch is well-formed, dispatchBatch commits all of them together');
+  assert.equal(dp3.world.getEventLog().length, batchLenBefore + 3, 'and only then do all three land, in one atomic step');
+  console.log('DP3 PASSED: an invalid item id crashing mid-build (the real completeQuest/combat failure mode) leaves the earlier-resolved transfer and gold grant undispatched — zero events from the interrupted batch reached the log — while a fully-valid batch still commits atomically');
+}
+
+// --- DP4: the REAL questEngine.completeQuest — refactored to build its full
+// reward list first — commits it through exactly ONE dispatchBatch call, not
+// one dispatch() per reward. A thin spy on world.dispatchBatch counts calls
+// during a real bread-run turn-in.
+{
+  const dp4 = buildSampleWorld();
+  createRelationshipEffectEngine(dp4.world, dp4.relationships);
+  const map4 = createWorldMapEngine(dp4.world);
+  const poi4 = createPoiEngine(dp4.world);
+  const faction4 = createFactionEngine(dp4.world);
+  const travel4 = createTravelEngine(dp4.world, map4, poi4);
+  const economy4 = createEconomyEngine(dp4.world, dp4.registry);
+  const quests4 = createQuestEngine(dp4.world, {
+    playerId: dp4.rowan.id, economy: economy4, relationships: dp4.relationships, faction: faction4, poi: poi4, travel: travel4,
+  });
+  assert.ok(quests4.acceptQuest('quest_bread_run').ok, 'accepting the bread run must succeed');
+
+  const realDispatchBatch = dp4.world.dispatchBatch;
+  let batchCalls = 0;
+  dp4.world.dispatchBatch = (events) => { batchCalls += 1; return realDispatchBatch(events); };
+
+  const lenBefore = dp4.world.getEventLog().length;
+  const done = quests4.completeQuest('quest_bread_run');
+  assert.ok(done.ok, `the bread-run turn-in must succeed (${done.reason ?? ''})`);
+  assert.equal(batchCalls, 1, 'completeQuest commits its entire reward set through exactly ONE dispatchBatch call');
+  const newEntries = dp4.world.getEventLog().slice(lenBefore);
+  assert.ok(newEntries.length > 1, 'the turn-in produced more than one event (the delivery/gold rewards plus QUEST_COMPLETED)');
+  assert.equal(newEntries.at(-1).type, 'QUEST_COMPLETED', 'QUEST_COMPLETED is still the last event committed');
+  assert.deepEqual(newEntries.map((e) => e.seq), newEntries.map((_, i) => lenBefore + i), 'every event from the turn-in lands with a contiguous seq — one atomic commit, not interleaved dispatches');
+  console.log(`DP4 PASSED: completeQuest committed its ${newEntries.length}-event reward set (${newEntries.map((e) => e.type).join(', ')}) through exactly one dispatchBatch call`);
+}
+
+console.log('\nSection DP PASSED: the dispatch entry point rejects any event whose payload carries an explicit undefined at any depth before it ever reaches the log, and dispatchBatch commits a composite action\'s full event list all-or-nothing — proven both generically and through the real completeQuest turn-in path');
+
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
 // transport plumbing, fallback + contract enforcement, memory fan-out, the
