@@ -26,7 +26,7 @@
 
 import { mulberry32 } from '../worldState.js';
 import { hashCoords, mapSeed, tierRank } from './worldMapEngine.js';
-import { weightedPick, nodeKeys } from './poiEngine.js';
+import { weightedPick, nodeKeys, hashString } from './poiEngine.js';
 import { effectiveSkill } from '../entities/entitySchema.js';
 import {
   getItemDef, getRecipe, AUTHORED_SHOPS, SHOPPABLE_CATEGORIES, SHOP_POOLS, EQUIP_SLOTS,
@@ -226,7 +226,10 @@ export function shopContextOf(shopRef) {
 //
 //  - kind 'poi' (a generated shop POI): mirrors deriveBaselinePois exactly —
 //    per-slot fresh mulberry32 seeded from (mapSeed, SHOP_STOCK_SALT +
-//    poiIndex*32 + slot, kx, ky); item picked by weightedPick over the
+//    poiSalt*32 + slot, kx, ky), where poiSalt is poiEngine's hashString(poi.id)
+//    — a hash of the POI's own content-stable id, NOT its position in the
+//    pool array, so two shops at the same node still decorrelate even if the
+//    pool is later resized/reordered; item picked by weightedPick over the
 //    category's pool, gated by settlement tier and sorted by defId (the
 //    availableCategories key-order discipline); stackables draw a quantity,
 //    non-stackables mint the position-deterministic id itm_bs_<poiId>_<slot>.
@@ -261,9 +264,9 @@ export function deriveBaselineStock(config, shopRef) {
 
   const seed = mapSeed(config);
   const { kx, ky } = nodeKeys(node);
-  const poiIndex = Number(/_b(\d+)$/.exec(poi.id)?.[1] ?? 0);
+  const poiSalt = hashString(poi.id);
   for (let j = 0; j < size; j++) {
-    const rng = mulberry32(hashCoords(seed, SHOP_STOCK_SALT + poiIndex * 32 + j, kx, ky));
+    const rng = mulberry32(hashCoords(seed, SHOP_STOCK_SALT + poiSalt * 32 + j, kx, ky));
     const defId = weightedPick(entries, rng());
     if (getItemDef(defId).stackable) {
       addStacks(stock.stacks, { [defId]: 1 + Math.floor(rng() * eco.shop.maxStackQty) }, +1);

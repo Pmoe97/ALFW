@@ -1788,7 +1788,8 @@ function runSectionM(record) {
     assert.equal(node.classification.kind, 'settlement', 'the chosen accepted site must classify as a settlement');
     const direct = deriveBaselinePois(cfg, node);
     assert.ok(direct.length > 0, 'a settlement node must have a non-empty baseline pool');
-    assert.ok(direct.every((p) => p.id === `poi_${node.id}_b${direct.indexOf(p)}`), 'baseline ids are deterministic poi_<nodeId>_b<i>');
+    assert.ok(direct.every((p) => /^poi_.*_c[0-9a-z]+$/.test(p.id)), 'baseline ids are content-hash-derived poi_<nodeId>_c<hash>, not positional');
+    assert.equal(new Set(direct.map((p) => p.id)).size, direct.length, 'baseline pool ids must be unique within one node');
 
     const engA = createWorldMapEngine(createWorldState(mapConfigWith()));
     engA.classifyAt(600, -400); // warm the shared classification ctx with far cells
@@ -3296,9 +3297,10 @@ function runSectionEC(record) {
   }
 
   // --- EC2: baseline stock is a pure function of (config, shopRef) — the M1
-  // analogue. Identical twice-derived; distinct per poi index; tier-gated
-  // (hamlet shops never carry city-gated goods); the authored Rusted Ledger
-  // baseline IS the shipped record.
+  // analogue. Identical twice-derived; distinct per poi id (the salt is
+  // hashString(poi.id), not a positional index); tier-gated (hamlet shops
+  // never carry city-gated goods); the authored Rusted Ledger baseline IS the
+  // shipped record.
   {
     const village = synthShopNode('village', 2600, 2600);
     const shopA = synthShopPoi(village, 0);
@@ -3310,7 +3312,7 @@ function runSectionEC(record) {
     assert.equal(once.gold, ecCfg.economy.shop.baseGoldByTier.village, 'shop gold comes from the tier table');
 
     const refB = { kind: 'poi', node: village, poi: synthShopPoi(village, 3) };
-    assert.notDeepEqual(deriveBaselineStock(ecCfg, refB), once, 'two shop POIs at the same node must stock independently (salt includes the poi index)');
+    assert.notDeepEqual(deriveBaselineStock(ecCfg, refB), once, 'two shop POIs at the same node must stock independently (salt is derived from the poi id, not a position)');
 
     const cityGated = new Set(SHOP_POOLS.general.filter((e) => e.minTier === 'city').map((e) => e.defId));
     const hamlet = synthShopNode('hamlet', 3100, 3100);
