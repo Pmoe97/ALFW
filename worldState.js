@@ -34,6 +34,38 @@ function deepFreeze(value) {
   return value;
 }
 
+// assertNoUndefinedDeep — the dispatch-entry-point guard. JSON.stringify
+// silently DROPS any object key whose value is `undefined` (array elements
+// become `null` instead, which is a different but related hazard), so a
+// payload carrying one serializes to something smaller than what was
+// dispatched — no error, no crash, just permanently corrupted history from
+// that point forward on reload (game/saveLoad.js's assertJsonSafe catches
+// this too, but only at SAVE time; a bad dispatch must never get that far).
+// Walks every present key/index; a key that is simply ABSENT is untouched —
+// "omit the field entirely" (actions/playerActions.js's nodeId) stays the
+// correct, unpenalized pattern. Only an explicit `=== undefined` on a
+// present key is the bug this catches.
+function assertNoUndefinedDeep(actionType, payload) {
+  function walk(value, path) {
+    if (Array.isArray(value)) {
+      value.forEach((item, i) => walk(item, `${path}[${i}]`));
+      return;
+    }
+    if (value !== null && typeof value === 'object') {
+      for (const key of Object.keys(value)) {
+        const v = value[key];
+        if (v === undefined) {
+          throw new Error(
+            `dispatch: event "${actionType}" has an explicit undefined value at payload${path}.${key} — omit the key instead of passing undefined`
+          );
+        }
+        walk(v, `${path}.${key}`);
+      }
+    }
+  }
+  walk(payload, '');
+}
+
 const REQUIRED_CONFIG_FIELDS = ['worldName', 'startDateTime', 'rngSeed'];
 
 export function createWorldState(config, savedLog = []) {
@@ -83,18 +115,49 @@ export function createWorldState(config, savedLog = []) {
 
   const random = mulberry32(config.rngSeed);
 
-  function dispatch(actionType, payload) {
-    const entry = deepFreeze({
-      seq: eventLog.length,
-      worldTime,
-      type: actionType,
-      payload: structuredClone(payload),
-    });
-    eventLog.push(entry);
-    for (const handler of subscribers.get(actionType) ?? []) {
-      handler(entry);
+  // dispatchBatch — the transactional twin of dispatch: takes an array of
+  // already-constructed events ({ type, payload }) and either commits ALL of
+  // them or NONE. Every event is validated (currently: the undefined-payload
+  // guard above) and its frozen entry built BEFORE any of them touch
+  // eventLog, so a failure partway through a batch — an invalid event later
+  // in the array — throws having appended nothing and notified nobody.
+  // Composite actions that dispatch several events for one logical player
+  // action (engines/questEngine.js's completeQuest, engines/combatEngine.js's
+  // act/finishCombat) build their full event list first and submit it here in
+  // one call, instead of dispatching as they go, so a failure mid-sequence
+  // can never strand earlier dispatches as permanent, un-rollback-able
+  // history. This requires no general rollback system: engines have no side
+  // effects beyond producing events, so front-loading validation before any
+  // commit is sufficient.
+  function dispatchBatch(events) {
+    if (!Array.isArray(events) || events.length === 0) {
+      throw new Error('dispatchBatch: events must be a non-empty array');
     }
-    return entry;
+    const startSeq = eventLog.length;
+    const entries = events.map((event, i) => {
+      if (!event || typeof event.type !== 'string') {
+        throw new Error(`dispatchBatch: event at index ${i} is missing a string "type"`);
+      }
+      assertNoUndefinedDeep(event.type, event.payload);
+      return deepFreeze({
+        seq: startSeq + i,
+        worldTime,
+        type: event.type,
+        payload: structuredClone(event.payload),
+      });
+    });
+    // Every entry validated and built — commit atomically, THEN notify.
+    eventLog.push(...entries);
+    for (const entry of entries) {
+      for (const handler of subscribers.get(entry.type) ?? []) {
+        handler(entry);
+      }
+    }
+    return entries;
+  }
+
+  function dispatch(actionType, payload) {
+    return dispatchBatch([{ type: actionType, payload }])[0];
   }
 
   function subscribe(actionType, handler) {
@@ -115,7 +178,7 @@ export function createWorldState(config, savedLog = []) {
     return structuredClone(eventLog);
   }
 
-  return { dispatch, subscribe, getState, getEventLog, random };
+  return { dispatch, dispatchBatch, subscribe, getState, getEventLog, random };
 }
 
 // Initialize a fresh world from a WorldConfig file alone.

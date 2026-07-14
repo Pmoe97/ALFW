@@ -168,17 +168,23 @@ export function createRelationshipStore(world) {
   }
   world.subscribe('RELATIONSHIP_EVENT', applyRelationshipEvent);
 
+  // resolveRelationshipEvent — PURE event construction, no dispatch; never
+  // fails (any axis/delta is accepted, exactly like recordRelationshipEvent
+  // always did — deriveRelationshipStats defensively ignores an unknown
+  // axis rather than rejecting it). Exposed so a composite action
+  // (combatEngine's resolveConsequences, questEngine's completeQuest) can build
+  // its full event list up front and submit it as one world.dispatchBatch —
+  // see worldState.js's dispatchBatch for why.
+  function resolveRelationshipEvent(fromId, toId, axis, delta, weight = 1) {
+    return { type: 'RELATIONSHIP_EVENT', payload: { fromId, toId, axis, delta, weight } };
+  }
+
   // recordRelationshipEvent — the single sanctioned way to move a stat. It only
   // dispatches the action; the subscribe handler above updates the cache. This
   // keeps stats append-only and rebuildable, unlike the removed setRelationship.
   function recordRelationshipEvent(fromId, toId, axis, delta, weight = 1) {
-    return world.dispatch('RELATIONSHIP_EVENT', {
-      fromId,
-      toId,
-      axis,
-      delta,
-      weight,
-    });
+    const event = resolveRelationshipEvent(fromId, toId, axis, delta, weight);
+    return world.dispatch(event.type, event.payload);
   }
 
   // setLabel — direct-set what fromId calls toId. Asymmetric and per-side, so
@@ -222,6 +228,7 @@ export function createRelationshipStore(world) {
     getRelationship,
     setLabel,
     recordRelationshipEvent,
+    resolveRelationshipEvent,
     rebuildRelationshipStats,
     getRelationshipHistory,
     setFamilyTie,

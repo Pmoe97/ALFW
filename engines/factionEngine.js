@@ -63,11 +63,21 @@ export function createFactionEngine(world) {
   }
   world.subscribe(FACTION_CONTROL_CHANGED, applyControlChanged);
 
+  // resolveFactionControlChange — PURE event construction, no dispatch; never
+  // fails. Exposed so a composite action (combatEngine's resolveConsequences,
+  // questEngine's completeQuest) can build its full event list up front and
+  // submit it as one world.dispatchBatch — see worldState.js's dispatchBatch
+  // for why.
+  function resolveFactionControlChange(settlementId, factionId) {
+    return { type: FACTION_CONTROL_CHANGED, payload: { settlementId, factionId: factionId ?? null } };
+  }
+
   // setFactionControl — the single sanctioned way to change control. It only
   // dispatches; the subscribe handler above updates the cache. This keeps control
   // append-only and rebuildable, never a directly-mutated field.
   function setFactionControl(settlementId, factionId) {
-    return world.dispatch(FACTION_CONTROL_CHANGED, { settlementId, factionId: factionId ?? null });
+    const event = resolveFactionControlChange(settlementId, factionId);
+    return world.dispatch(event.type, event.payload);
   }
 
   // getFactionControl — current controller of a settlement node. Reads the
@@ -89,6 +99,7 @@ export function createFactionEngine(world) {
 
   return {
     setFactionControl,
+    resolveFactionControlChange,
     getFactionControl,
     rebuildFactionControl,
   };

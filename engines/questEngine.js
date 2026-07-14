@@ -267,8 +267,14 @@ export function createQuestEngine(world, { playerId, economy, relationships, fac
   }
 
   // completeQuest — turn-in. Validates everything first (status, location,
-  // every objective derived-done), then dispatches in the safety order the
-  // header describes: deliveries → rewards → QUEST_COMPLETED last.
+  // every objective derived-done), then BUILDS the full list of resultant
+  // events — deliveries, then rewards, then QUEST_COMPLETED last, the safety
+  // order the header describes — and commits them in ONE world.dispatchBatch
+  // call. Building every event before dispatching any of them means a
+  // failure anywhere in the build (an invalid reward item def, a delivery
+  // that fails to resolve) leaves the log completely untouched, instead of
+  // the old per-step dispatch leaving earlier rewards permanently paid while
+  // the quest never reaches 'completed' (see worldState.js's dispatchBatch).
   function completeQuest(questId) {
     const fail = (reason) => ({ ok: false, reason });
     if (combat?.getActiveCombat()) return fail('a combat is in progress');
@@ -284,6 +290,8 @@ export function createQuestEngine(world, { playerId, economy, relationships, fac
       if (!done) return fail(`objective not met: ${objective.text}`);
     }
 
+    const events = [];
+
     // Deliveries: consume the goods through the economy's atomic transfer.
     // Skip any delivery a prior attempt already committed (a re-run after an
     // interrupted turn-in must not take the items twice).
@@ -291,25 +299,28 @@ export function createQuestEngine(world, { playerId, economy, relationships, fac
       if (objective.type !== 'deliverItems') continue;
       const { delivered } = matchObjective(world.getEventLog(), objective, s.acceptedSeq, playerId);
       if (delivered) continue;
-      const transfer = economy.transferItems(playerId, objective.npcId, { stacks: objective.stacks }, questId);
+      const transfer = economy.resolveTransferItems(playerId, objective.npcId, { stacks: objective.stacks }, questId);
       if (!transfer.ok) return fail(`delivery failed: ${transfer.reason}`);
+      events.push(transfer.event);
     }
 
     // Rewards, through the real systems — no parallel grant mechanism.
     const rewards = def.rewards ?? {};
-    if (rewards.gold) economy.grantGold(playerId, rewards.gold, questId);
-    if (rewards.items) economy.grantItems(playerId, rewards.items, questId);
+    if (rewards.gold) events.push(economy.resolveGrantGold(playerId, rewards.gold, questId));
+    if (rewards.items) events.push(economy.resolveGrantItems(playerId, rewards.items, questId));
     for (const { fromId, toId, axis, delta } of rewards.relationshipEvents ?? []) {
-      relationships.recordRelationshipEvent(fromId, toId, axis, delta);
+      events.push(relationships.resolveRelationshipEvent(fromId, toId, axis, delta));
     }
     for (const { settlementId, factionId } of rewards.factionControl ?? []) {
-      faction.setFactionControl(settlementId, factionId);
+      events.push(faction.resolveFactionControlChange(settlementId, factionId));
     }
 
     // The status fact commits LAST — see the header's ordering rationale.
     // The payload embeds the paid-out reward block as the audit record.
-    const entry = world.dispatch(QUEST_COMPLETED, { questId, atNodeId, rewards });
-    return { ok: true, entry };
+    events.push({ type: QUEST_COMPLETED, payload: { questId, atNodeId, rewards } });
+
+    const entries = world.dispatchBatch(events);
+    return { ok: true, entry: entries.at(-1) };
   }
 
   // abandonQuest — active → failed (terminal in v1). No rewards, no refunds;
