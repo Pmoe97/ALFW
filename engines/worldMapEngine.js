@@ -637,6 +637,54 @@ function findPassableOrigin(config) {
   return { x: 0, y: 0 };
 }
 
+// findSettlementAdjacentOrigin — the isekai-landing placement. PURE in
+// (config, tierCap). Finds the nearest ACCEPTED settlement to the world origin
+// whose tier is at most `tierCap` (a "small settlement" — hamlet/village), then
+// returns a passable WILDERNESS coordinate a short hop outside it (beyond
+// snapRadius, within ~one inter-node distance) so the player wakes JUST OUTSIDE
+// the settlement rather than inside it. Falls back to findPassableOrigin when no
+// small settlement is reachable. Returns { x, y, settlement } (settlement = the
+// nearby site, for the landing narration). Gated behind config.startTier so the
+// default world's origin — and proof.js — are unchanged.
+const LANDING_SEARCH_RINGS = 80;
+const LANDING_PLACE_ANGLES = 16;
+function findSettlementAdjacentOrigin(config, tierCap) {
+  const ctx = makeClassCtx();
+  const s = readClassification(config).settlement;
+  const capRank = tierRank(tierCap) < 0 ? tierRank('village') : tierRank(tierCap);
+
+  // Nearest accepted small settlement to (0,0), scanning cell rings outward.
+  let best = null;
+  let bestDist = Infinity;
+  for (let ring = 0; ring <= LANDING_SEARCH_RINGS; ring++) {
+    for (let cx = -ring; cx <= ring; cx++) {
+      for (let cy = -ring; cy <= ring; cy++) {
+        if (Math.max(Math.abs(cx), Math.abs(cy)) !== ring) continue; // perimeter only
+        const site = isSettlementSiteAccepted(config, cx, cy, ctx);
+        if (!site || tierRank(site.tier) > capRank) continue;
+        const d = Math.hypot(site.x, site.y);
+        if (d < bestDist) { bestDist = d; best = site; }
+      }
+    }
+    // Found one and the next ring cannot hold anything closer — stop.
+    if (best && ring * s.cellSize > bestDist + s.cellSize) break;
+  }
+  if (!best) return { ...findPassableOrigin(config), settlement: null };
+
+  // A passable wilderness coordinate a short hop outside the settlement.
+  const wm = readWorldMap(config);
+  const hop = s.snapRadius + (wm.baseInterNodeDistance ?? 10) * 0.6;
+  for (let a = 0; a < LANDING_PLACE_ANGLES; a++) {
+    const ang = (a / LANDING_PLACE_ANGLES) * Math.PI * 2;
+    const x = best.x + hop * Math.cos(ang);
+    const y = best.y + hop * Math.sin(ang);
+    if (!deriveTerrainAt(config, x, y).passable) continue;
+    if (deriveClassificationAt(config, x, y, ctx).kind === 'settlement') continue;
+    return { x, y, settlement: best };
+  }
+  return { ...findPassableOrigin(config), settlement: best };
+}
+
 // The one event this engine owns: a node's first neighbor-materialization,
 // i.e. the player's exploration history (see the header note on the explored
 // graph). Terrain/classification stay pure and unlogged.
@@ -679,7 +727,15 @@ export function createWorldMapEngine(world) {
   // The deterministic, guaranteed-passable seed node near (0,0). Both its
   // position and its terrain are pure functions of (seed, config), so it is
   // fixed and fully rebuildable.
-  const originCoord = findPassableOrigin(config);
+  // Isekai placement: when the run declares a start tier (Character Creation),
+  // land the player just outside a small settlement; otherwise the classic
+  // passable-origin near (0,0). Both are pure functions of (seed, config), so the
+  // origin stays fully rebuildable and the default world is unchanged.
+  const originResult = config.startTier
+    ? findSettlementAdjacentOrigin(config, config.startTier)
+    : { ...findPassableOrigin(config), settlement: null };
+  const originCoord = { x: originResult.x, y: originResult.y };
+  const startSettlement = originResult.settlement;
   const origin = materializeNode(originCoord.x, originCoord.y);
 
   // Nearest already-materialized node within `radius` of (x, y), or null.
@@ -819,6 +875,13 @@ export function createWorldMapEngine(world) {
     return origin;
   }
 
+  // The small settlement the isekai landing placed the player beside (null for a
+  // default, non-isekai world). Read by the landing narration; not authoritative
+  // state — purely the site chosen at origin selection.
+  function getStartSettlement() {
+    return startSettlement;
+  }
+
   function isMaterialized(nodeId) {
     return materialized.has(nodeId);
   }
@@ -831,6 +894,7 @@ export function createWorldMapEngine(world) {
     rebuildNodeAt,
     rebuildClassificationAt,
     getOriginNode,
+    getStartSettlement,
     isMaterialized,
   };
 }

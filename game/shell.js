@@ -18,6 +18,7 @@ import { FONT_HEAD, FONT_BODY, secondaryActionButtonStyle, primaryActionButtonSt
 import { renderMainMenu } from './ui/screens/mainMenu.js';
 import { renderWorldConfigEditor } from './ui/screens/worldConfigEditor.js';
 import { renderCreation, initCreation } from './ui/screens/creation.js';
+import { renderLanding } from './ui/screens/landing.js';
 import { buildLiveGame } from './liveGame.js';
 import { WORLD_CONFIG } from './sampleWorld.js';
 import { createPersistence } from './persistence.js';
@@ -28,6 +29,10 @@ export function createShell(mountPoint, persistence = createPersistence()) {
   // The live run currently mounted (null in pre-play phases). Held so a return
   // to the menu can stop the tick and detach the window listeners.
   let running = null;
+  // A world built but not yet entered — held during the isekai landing beat (the
+  // world exists and can be read for the narration, but its tick is not started
+  // until the player opens their eyes).
+  let pendingGame = null;
 
   function setState(patch) {
     Object.assign(state, patch);
@@ -43,7 +48,14 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     // playerCharacter). The WorldConfig editor's "start from preset" also calls
     // newGame(config) directly, skipping creation.
     startCreation: () => { state.creation = initCreation(shell); setState({ phase: 'creation' }); },
-    newGame: (config) => enterPlay(buildLiveGame({ config })),
+    // A fresh run. An isekai run (config.startTier, set by the wizard) pauses on
+    // the landing beat before play; anything else drops straight in.
+    newGame: (config) => {
+      const game = buildLiveGame({ config });
+      if (config?.startTier) { pendingGame = game; setState({ phase: 'landing' }); }
+      else enterPlay(game);
+    },
+    enterPlayFromLanding: () => { const g = pendingGame; pendingGame = null; enterPlay(g); },
     continueGame: () => setState({ phase: 'continue' }),
     openWorldConfig: () => {
       if (!state.editor) state.editor = { presetName: '', draft: structuredClone(WORLD_CONFIG) };
@@ -71,6 +83,7 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     mountPoint.appendChild(host);
     if (state.phase === 'worldConfig') host.appendChild(renderWorldConfigEditor(shell));
     else if (state.phase === 'creation') host.appendChild(renderCreation(shell));
+    else if (state.phase === 'landing' && pendingGame) host.appendChild(renderLanding(shell, pendingGame));
     else if (state.phase === 'continue') host.appendChild(renderContinue());
     else host.appendChild(renderMainMenu(shell));
   }
