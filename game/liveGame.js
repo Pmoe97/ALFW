@@ -31,8 +31,8 @@ import { getDialogue } from '../ai/getDialogue.js';
 // order is canonical and load-bearing (map → poi → clock → faction/npc → memory →
 // economy → combat → travel → quests); see the inline notes carried over from the
 // original app.js.
-export function buildLiveGame({ save } = {}) {
-  const { world, registry, relationships, conversationHistory, races, mira, rowan, sable } = buildSampleWorld({ save });
+export function buildLiveGame({ save, config: presetConfig } = {}) {
+  const { world, registry, relationships, conversationHistory, races, mira, rowan, sable } = buildSampleWorld({ save, config: presetConfig });
   createRelationshipEffectEngine(world, relationships);
 
   const map = createWorldMapEngine(world);

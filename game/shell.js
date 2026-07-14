@@ -16,7 +16,9 @@ import { applyTheme, DEFAULT_THEME } from './ui/theme.js';
 import { clearEl, div, button } from './ui/dom.js';
 import { FONT_HEAD, FONT_BODY, secondaryActionButtonStyle, primaryActionButtonStyle, panelStyle } from './ui/styles.js';
 import { renderMainMenu } from './ui/screens/mainMenu.js';
+import { renderWorldConfigEditor } from './ui/screens/worldConfigEditor.js';
 import { buildLiveGame } from './liveGame.js';
+import { WORLD_CONFIG } from './sampleWorld.js';
 import { createPersistence } from './persistence.js';
 import { createApp } from './ui/app-state.js';
 
@@ -35,14 +37,24 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     state,
     setState,
     hasSaves: () => persistence.listSaves().length > 0,
-    newGame: () => enterPlay(buildLiveGame()),
+    // A fresh run — optionally from a named preset's config (Character Creation
+    // and the WorldConfig editor both start games this way).
+    newGame: (config) => enterPlay(buildLiveGame({ config })),
     continueGame: () => setState({ phase: 'continue' }),
-    openWorldConfig: () => setState({ phase: 'worldConfig' }),
+    openWorldConfig: () => {
+      if (!state.editor) state.editor = { presetName: '', draft: structuredClone(WORLD_CONFIG) };
+      setState({ phase: 'worldConfig' });
+    },
     backToMenu: () => { teardown(); setState({ phase: 'menu' }); },
     loadSave: (name) => {
       const save = persistence.loadSave(name);
       if (save) enterPlay(buildLiveGame({ save }));
     },
+    // Preset library, delegated to persistence for the editor.
+    listPresets: () => persistence.listPresets(),
+    getPreset: (name) => persistence.getPreset(name),
+    savePreset: (name, config) => persistence.savePreset(name, config),
+    deletePreset: (name) => persistence.deletePreset(name),
   };
 
   // renderPhase — draw the current PRE-PLAY phase. Never runs during 'play'
@@ -53,25 +65,9 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     const host = div('min-height:100vh; background:var(--bg);');
     applyTheme(host, state.theme);
     mountPoint.appendChild(host);
-    if (state.phase === 'worldConfig') host.appendChild(renderWorldConfigPlaceholder());
+    if (state.phase === 'worldConfig') host.appendChild(renderWorldConfigEditor(shell));
     else if (state.phase === 'continue') host.appendChild(renderContinue());
     else host.appendChild(renderMainMenu(shell));
-  }
-
-  // Placeholder until Stage 3's real editor; keeps the phase reachable and the
-  // back-navigation wired so the flow is testable end to end now.
-  function renderWorldConfigPlaceholder() {
-    return centered(
-      div(panelStyle('padding:36px 44px; display:flex; flex-direction:column; align-items:center; gap:16px; max-width:460px; text-align:center;'), {
-        children: [
-          div(`font:600 20px ${FONT_HEAD}; color:var(--accent-strong);`, { text: 'WorldConfig' }),
-          div(`font:400 12.5px ${FONT_BODY}; color:var(--text-muted); line-height:1.5;`, {
-            text: 'Named world presets — theme, difficulty, weather, content toggles, and the stat/appearance field schema — will be authored here. The editor arrives in a later stage.',
-          }),
-          button('Back to menu', secondaryActionButtonStyle() + ' margin-top:4px;', () => shell.backToMenu()),
-        ],
-      })
-    );
   }
 
   // Continue — the saved-run list. Each row loads or deletes a slot. An empty
