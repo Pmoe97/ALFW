@@ -22,6 +22,7 @@ import { renderLanding } from './ui/screens/landing.js';
 import { buildLiveGame } from './liveGame.js';
 import { WORLD_CONFIG } from './sampleWorld.js';
 import { createPersistence } from './persistence.js';
+import { createLocationCache } from './locationCache.js';
 import { createApp } from './ui/app-state.js';
 
 export function createShell(mountPoint, persistence = createPersistence()) {
@@ -163,6 +164,9 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     };
 
     const { render } = createApp(game.ctx, mountPoint);
+    // The location text/image cache lives per-run and swaps generated results in
+    // by re-rendering. Its contents are in-memory only — never logged or saved.
+    game.ctx.locationCache = createLocationCache({ onUpdate: () => render() });
     const unsubTick = game.world.subscribe('CLOCK_TICK', render);
 
     const cfg = game.config;

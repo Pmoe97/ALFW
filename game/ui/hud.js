@@ -78,6 +78,7 @@ export function renderHud(ui) {
   // Quick access — real navigation
   const quick = div('display:flex; align-items:center; gap:4px;', {
     children: [
+      hudBtn('pin', 'Here (home)', () => setState({ screen: 'freeplay' })),
       hudBtn('inventory', 'Inventory', () => setState({ screen: 'inventory' })),
       hudBtn('journal', 'Journal & Map', () => setState({ screen: 'journal' })),
       hudBtn('character', 'Character sheet', () => setState({ screen: 'character' })),

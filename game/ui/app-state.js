@@ -18,8 +18,10 @@ import { renderCharacter } from './screens/character.js';
 import { renderTrading } from './screens/trading.js';
 import { renderCraft } from './screens/craft.js';
 import { renderCombat } from './screens/combat.js';
+import { renderFreeplay } from './screens/freeplay.js';
 
 const SCREENS = {
+  freeplay: renderFreeplay,
   travel: renderTravel,
   conversation: renderConversation,
   inventory: renderInventory,
@@ -31,7 +33,7 @@ const SCREENS = {
 };
 
 const INITIAL_STATE = {
-  screen: 'travel',
+  screen: 'freeplay',
   theme: 'leather',
   // per-screen variant/sub-state (the design's variants + tabs)
   travelVariant: 'a',
