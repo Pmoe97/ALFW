@@ -319,6 +319,23 @@ export function deriveEquipped(log, entityId) {
 export function createEconomyEngine(world, registry) {
   const config = world.getState().config;
 
+  // combatEngine is late-bound via setCombatEngine, not constructor-injected:
+  // economy is constructed BEFORE combat (combat depends on a live economy
+  // reference — equipped-item stats, loot grants — so the order can't
+  // reverse). The setter is called once, immediately after combat is built,
+  // before anything else can dispatch — see game/app.js and proof.js
+  // slWireEngines. Guards a player-facing verb from firing while a fight is
+  // open, the same belt-and-braces travel's startTravel/startExplore already
+  // apply: the UI blocks navigation to these screens during combat, but the
+  // engine must not trust that alone.
+  let combatEngine = null;
+  function setCombatEngine(engine) {
+    combatEngine = engine;
+  }
+  function combatGuard() {
+    return combatEngine?.getActiveCombat() ? { ok: false, reason: 'a combat is in progress' } : null;
+  }
+
   // Caches — provably-redundant accelerators over the log, rebuildable via
   // the rebuild* functions below. Holdings/equipped objects are owned solely
   // by this engine; readers clone.
@@ -534,6 +551,8 @@ export function createEconomyEngine(world, registry) {
   // NOTHING. A failed attempt leaves the log untouched.
 
   function trade(actorId, shopRef, offer) {
+    const blocked = combatGuard();
+    if (blocked) return blocked;
     const resolved = resolveOffer(actorId, shopRef, offer);
     if (!resolved.ok) return resolved;
     const entry = world.dispatch(TRADE_COMPLETED, {
@@ -548,6 +567,8 @@ export function createEconomyEngine(world, registry) {
 
   function craft(actorId, stationId, recipeId) {
     const fail = (reason) => ({ ok: false, reason });
+    const blocked = combatGuard();
+    if (blocked) return blocked;
     const recipe = getRecipe(recipeId);
     if (recipe.stationId !== stationId) return fail(`recipe "${recipeId}" belongs to ${recipe.stationId}, not ${stationId}`);
     const actor = registry.get(actorId);
@@ -612,6 +633,8 @@ export function createEconomyEngine(world, registry) {
 
   function equip(entityId, slot, instanceId) {
     const fail = (reason) => ({ ok: false, reason });
+    const blocked = combatGuard();
+    if (blocked) return blocked;
     if (!EQUIP_SLOTS.includes(slot)) return fail(`unknown slot "${slot}"`);
     if (instanceId !== null) {
       const inst = getInventory(entityId).instances.find((i) => i.instanceId === instanceId);
@@ -625,6 +648,8 @@ export function createEconomyEngine(world, registry) {
 
   function drop(entityId, { stacks, instanceIds } = {}) {
     const fail = (reason) => ({ ok: false, reason });
+    const blocked = combatGuard();
+    if (blocked) return blocked;
     const inventory = getInventory(entityId);
     const payload = { entityId };
     if (stacks && Object.keys(stacks).length > 0) {
@@ -718,5 +743,6 @@ export function createEconomyEngine(world, registry) {
     rebuildInventory,
     rebuildEquipped,
     rebuildShopStock,
+    setCombatEngine,
   };
 }

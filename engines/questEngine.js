@@ -180,7 +180,7 @@ export function deriveObjectiveProgress(log, questId, playerId) {
 // others; collaborators are the REAL engines its verbs dispatch through
 // (memoryEngine's injected-collaborator shape). playerId is the acting
 // entity every objective and reward resolves against.
-export function createQuestEngine(world, { playerId, economy, relationships, faction, poi, travel }) {
+export function createQuestEngine(world, { playerId, economy, relationships, faction, poi, travel, combat = null }) {
   // The one cache: questId -> { status, acceptedSeq, resolvedSeq }. A
   // provably-redundant accelerator over deriveQuestStatuses (see
   // rebuildQuestStatuses). Objective progress is deliberately uncached.
@@ -249,6 +249,7 @@ export function createQuestEngine(world, { playerId, economy, relationships, fac
   // arms the travel screen's directed "Seek out" lead for it.
   function acceptQuest(questId) {
     const fail = (reason) => ({ ok: false, reason });
+    if (combat?.getActiveCombat()) return fail('a combat is in progress');
     const def = getQuestDef(questId);
     const s = statusOf(questId);
     if (s.status !== 'available') return fail(`quest is ${s.status}, not available`);
@@ -270,6 +271,7 @@ export function createQuestEngine(world, { playerId, economy, relationships, fac
   // header describes: deliveries → rewards → QUEST_COMPLETED last.
   function completeQuest(questId) {
     const fail = (reason) => ({ ok: false, reason });
+    if (combat?.getActiveCombat()) return fail('a combat is in progress');
     const def = getQuestDef(questId);
     const s = statusOf(questId);
     if (s.status !== 'active') return fail(`quest is ${s.status}, not active`);
@@ -315,6 +317,7 @@ export function createQuestEngine(world, { playerId, economy, relationships, fac
   // not vanish because you stopped looking for it).
   function abandonQuest(questId) {
     const fail = (reason) => ({ ok: false, reason });
+    if (combat?.getActiveCombat()) return fail('a combat is in progress');
     getQuestDef(questId); // unknown ids throw, matching the other verbs
     const s = statusOf(questId);
     if (s.status !== 'active') return fail(`quest is ${s.status}, not active`);
