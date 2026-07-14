@@ -56,7 +56,7 @@ export function createShell(mountPoint, persistence = createPersistence()) {
       if (config?.startTier) { pendingGame = game; setState({ phase: 'landing' }); }
       else enterPlay(game);
     },
-    enterPlayFromLanding: () => { const g = pendingGame; pendingGame = null; enterPlay(g); },
+    enterPlayFromLanding: () => { const g = pendingGame; pendingGame = null; enterPlay(g, { walkthrough: true }); },
     continueGame: () => setState({ phase: 'continue' }),
     openWorldConfig: () => {
       if (!state.editor) state.editor = { presetName: '', draft: structuredClone(WORLD_CONFIG) };
@@ -141,7 +141,7 @@ export function createShell(mountPoint, persistence = createPersistence()) {
   // owns rendering; the shell wires the per-tick re-render and pause-on-blur
   // exactly as the old app.js did, but keeps handles so the run can be torn down,
   // and injects a `session` API (save / quit-to-menu) for the in-game debug menu.
-  function enterPlay(game) {
+  function enterPlay(game, opts = {}) {
     teardown();
     clearEl(mountPoint);
 
@@ -163,10 +163,12 @@ export function createShell(mountPoint, persistence = createPersistence()) {
       quitToMenu: () => shell.backToMenu(),
     };
 
-    const { render } = createApp(game.ctx, mountPoint);
+    const { ui, render } = createApp(game.ctx, mountPoint);
     // The location text/image cache lives per-run and swaps generated results in
     // by re-rendering. Its contents are in-memory only — never logged or saved.
     game.ctx.locationCache = createLocationCache({ onUpdate: () => render() });
+    // First-run onboarding: show the click-through walkthrough over Freeplay.
+    if (opts.walkthrough) ui.setState({ walkthroughActive: true, walkthroughStep: 0 });
     const unsubTick = game.world.subscribe('CLOCK_TICK', render);
 
     const cfg = game.config;
