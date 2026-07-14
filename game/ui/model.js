@@ -17,6 +17,8 @@
 import { relationshipTier, TIER_THRESHOLDS } from '../../entities/relationshipStore.js';
 import { deriveEmotion } from '../../entities/deriveEmotion.js';
 import { deriveTimeOfDayBucket } from '../../engines/worldClockEngine.js';
+import { deriveScheduleState } from '../../engines/npcGeneratorEngine.js';
+import { weatherForLocation } from '../../engines/weather.js';
 import { effectiveSkill, PRIMARY_SKILL_ATTRIBUTE, ATTRIBUTE_NAMES } from '../../entities/entitySchema.js';
 import { PERSONALITY_AXES } from '../../entities/raceRegistry.js';
 import { priceFor, shopContextOf } from '../../engines/economyEngine.js';
@@ -65,6 +67,49 @@ export function buildHud(ctx) {
     locationSub: nodeSubLabel(node, faction),
     clockText: `${d.monthName} Wk${d.week} Day ${d.day} · ${two(d.hour)}:${two(d.minute)} (${bucket})`,
     visibility: { pct: 0, unwired: true }, // no visibility/notoriety stat exists
+  };
+}
+
+// ---- FREEPLAY (home base) --------------------------------------------------
+// The location-state facts the Freeplay screen renders and the AI/placeholder
+// location pipeline keys on. Pure live reads; no generation side effects (the
+// NPC roster is only read where already populated, never populateNode'd here).
+export function buildFreeplay(ctx) {
+  const { engines, config } = ctx;
+  const node = engines.map.getNode(engines.travel.getPlayerNodeId());
+  const date = engines.clock.getCurrentDate();
+  const bucket = deriveTimeOfDayBucket(date.hour);
+  const weather = weatherForLocation(config, engines.clock, node);
+  // getPoiState returns discovered as a Set of POI ids and undiscovered as stubs;
+  // resolve the discovered ids back to their stubs (with categories) via the pool.
+  const poiState = node ? engines.poi.getPoiState(node) : { discovered: new Set(), undiscovered: [], pool: [] };
+  const discoveredStubs = (poiState.pool || []).filter((p) => poiState.discovered.has(p.id));
+  const poiNames = discoveredStubs.map((p) => p.category);
+  const rosterIds = node ? (engines.npcGen.rosterIdsAt(node.id) || []) : [];
+  const npcNames = rosterIds
+    .map((id) => engines.registry.get(id))
+    .filter((n) => n && deriveScheduleState(n.schedule, date.hour).available)
+    .map((n) => n.identity.firstName);
+
+  const facts = {
+    nodeId: node?.id ?? 'unknown',
+    terrain: node?.terrainType,
+    kind: node?.classification?.kind,
+    tier: node?.classification?.tier,
+    settlementLabel: node?.classification?.settlementId,
+    date: { monthName: date.monthName },
+    bucket,
+    weather,
+    season: date.monthIndex,
+    poiNames,
+    npcNames,
+  };
+  return {
+    node, date, bucket, weather, facts,
+    label: nodeLabel(node),
+    poiCount: poiState.discovered?.size ?? 0,
+    undiscoveredCount: (poiState.undiscovered || []).length,
+    npcNames,
   };
 }
 

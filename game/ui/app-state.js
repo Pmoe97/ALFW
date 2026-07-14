@@ -18,8 +18,11 @@ import { renderCharacter } from './screens/character.js';
 import { renderTrading } from './screens/trading.js';
 import { renderCraft } from './screens/craft.js';
 import { renderCombat } from './screens/combat.js';
+import { renderFreeplay } from './screens/freeplay.js';
+import { renderWalkthrough } from './screens/walkthrough.js';
 
 const SCREENS = {
+  freeplay: renderFreeplay,
   travel: renderTravel,
   conversation: renderConversation,
   inventory: renderInventory,
@@ -31,7 +34,7 @@ const SCREENS = {
 };
 
 const INITIAL_STATE = {
-  screen: 'travel',
+  screen: 'freeplay',
   theme: 'leather',
   // per-screen variant/sub-state (the design's variants + tabs)
   travelVariant: 'a',
@@ -45,6 +48,8 @@ const INITIAL_STATE = {
   journalTab: 'log',
   characterTab: 'overview',
   combatTargetId: null,
+  walkthroughActive: false,
+  walkthroughStep: 0,
   craftStation: 'blacksmith',
   craftRecipeId: 'bs1',
   offerPlayerIds: [],
@@ -65,8 +70,9 @@ export function createApp(ctx, mountPoint) {
   const contentHost = document.createElement('div');
   contentHost.style.cssText = 'flex:1; min-height:0; overflow:auto;';
   const debugHost = document.createElement('div');
+  const overlayHost = document.createElement('div'); // modal overlays (walkthrough)
 
-  root.append(hudHost, contentHost, debugHost);
+  root.append(hudHost, contentHost, debugHost, overlayHost);
   mountPoint.appendChild(root);
 
   const ui = { state, ctx, setState, root };
@@ -97,6 +103,10 @@ export function createApp(ctx, mountPoint) {
     const screenFn = SCREENS[screenId] || SCREENS.travel;
     clearEl(contentHost).appendChild(screenFn(ui));
     clearEl(debugHost).appendChild(renderDebugMenu(ui));
+    // First-run walkthrough overlay — modal over the live view, never during a
+    // forced combat screen (so it can't hide a fight the player must resolve).
+    clearEl(overlayHost);
+    if (state.walkthroughActive && !forceCombat) overlayHost.appendChild(renderWalkthrough(ui));
 
     if (focusId) {
       const again = document.getElementById(focusId);

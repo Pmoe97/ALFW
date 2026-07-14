@@ -18,7 +18,10 @@ import { log } from '../debugLog.js';
 // Mirrors worldConfig.json — keep these two in sync by hand. createWorldState()
 // (not initWorldState()) is used deliberately: this runs in a browser/
 // Perchance page with no filesystem access, so the config must be inlined.
-const WORLD_CONFIG = {
+// Exported so the WorldConfig editor can clone it as the base template a named
+// preset is authored from, and so a fresh run started from a preset can pass the
+// edited config to buildSampleWorld({ config }).
+export const WORLD_CONFIG = {
   worldName: 'Aldervale',
   startDateTime: '1024-03-01T06:00:00Z',
   rngSeed: 12345,
@@ -359,7 +362,7 @@ const WORLD_CONFIG = {
 // logged as a loud, non-fatal warning naming the differing top-level keys —
 // never a load-time throw, which would brick every existing save the moment
 // the shipped config changes at all.
-export function buildSampleWorld({ save } = {}) {
+export function buildSampleWorld({ save, config } = {}) {
   if (save) {
     const drift = diffConfigKeys(WORLD_CONFIG, save.config);
     if (drift.length > 0) {
@@ -371,7 +374,11 @@ export function buildSampleWorld({ save } = {}) {
     }
   }
 
-  const world = createWorldState(save?.config ?? WORLD_CONFIG, save?.eventLog ?? []);
+  // Config precedence: a save replays under its OWN embedded config; a fresh run
+  // started from a named preset uses that preset's config; otherwise the shipped
+  // default. A preset only reshapes a NEW world — never an existing save.
+  const effectiveConfig = save?.config ?? config ?? WORLD_CONFIG;
+  const world = createWorldState(effectiveConfig, save?.eventLog ?? []);
 
   // The live race registry (settings surface). Constructed first — before any
   // dispatches — because its RACE_* subscriptions must not miss an edit event
@@ -513,6 +520,21 @@ export function buildSampleWorld({ save } = {}) {
     },
     inventory: [],
   });
+
+  // Character Creation delivers the player as effectiveConfig.playerCharacter
+  // (carried IN the config so it is embedded in a save and re-applied identically
+  // on load). It reskins the registered player slot in place — keeping the id
+  // `player_rowan` so every seed that references it (starting gold, the Mira
+  // relationship, combat/quest playerId) stays wired — while replacing the
+  // authored identity/appearance/psychology/capabilities with the created ones.
+  const pc = effectiveConfig.playerCharacter;
+  if (pc) {
+    if (pc.identity) rowan.identity = { ...rowan.identity, ...structuredClone(pc.identity) };
+    if (pc.appearance) rowan.appearance = structuredClone(pc.appearance);
+    if (pc.psychology) rowan.psychology = { ...structuredClone(pc.psychology), memories: rowan.psychology.memories ?? [] };
+    if (pc.capabilities) rowan.capabilities = structuredClone(pc.capabilities);
+    if (pc.playerData) rowan.playerData = { ...(rowan.playerData ?? {}), ...structuredClone(pc.playerData) };
+  }
 
   const sable = createNpc({
     id: 'npc_sable', // proprietor of the Rusted Ledger, Mira's oldest friend and quietest grudge
