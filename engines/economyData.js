@@ -34,18 +34,31 @@ export const EQUIP_SLOTS = Object.freeze([
 // (enchantments) can be added later without a migration. `baseValue` is the
 // flat worth in gold that priceFor spreads into shop buy/sell prices;
 // `weight` is carry weight (display-only for now).
+//
+// The optional `combat` block is what the combat engine reads. Committed
+// combat events carry the fully resolved numbers, so retuning these never
+// rewrites history (the same replay-safety argument as baseValue above):
+//   kind:'weapon'     — `skill` names the attacker's EXISTING primary skill
+//                       (melee → athletics, ranged → perception); damage is
+//                       damageBase + 0..damageSpread variance; ranged adds
+//                       agility/4 instead of strength/4; nonlethalCapable
+//                       weapons subdue at full damage, all others strike to
+//                       subdue at config.combat.nonlethalDamageFactor.
+//   kind:'armor'      — flat `armor` damage reduction, summed across every
+//                       equipped armor piece.
+//   kind:'consumable' — `heal` hp restored when consumed (ITEM_CONSUMED).
 export const ITEM_DEFS = deepFreeze({
   // weapons
-  iron_dagger: { id: 'iron_dagger', name: 'Iron Dagger', category: 'weapons', stackable: false, baseValue: 20, weight: 1.0, slot: 'mainHand' },
-  iron_sword: { id: 'iron_sword', name: 'Iron Sword', category: 'weapons', stackable: false, baseValue: 60, weight: 3.5, slot: 'mainHand' },
-  oak_staff: { id: 'oak_staff', name: 'Oak Staff', category: 'weapons', stackable: false, baseValue: 15, weight: 2.0, slot: 'mainHand' },
-  hunting_bow: { id: 'hunting_bow', name: 'Hunting Bow', category: 'weapons', stackable: false, baseValue: 45, weight: 1.5, slot: 'mainHand' },
+  iron_dagger: { id: 'iron_dagger', name: 'Iron Dagger', category: 'weapons', stackable: false, baseValue: 20, weight: 1.0, slot: 'mainHand', combat: { kind: 'weapon', skill: 'athletics', damageBase: 3, damageSpread: 3, nonlethalCapable: false } },
+  iron_sword: { id: 'iron_sword', name: 'Iron Sword', category: 'weapons', stackable: false, baseValue: 60, weight: 3.5, slot: 'mainHand', combat: { kind: 'weapon', skill: 'athletics', damageBase: 5, damageSpread: 4, nonlethalCapable: false } },
+  oak_staff: { id: 'oak_staff', name: 'Oak Staff', category: 'weapons', stackable: false, baseValue: 15, weight: 2.0, slot: 'mainHand', combat: { kind: 'weapon', skill: 'athletics', damageBase: 3, damageSpread: 3, nonlethalCapable: true } },
+  hunting_bow: { id: 'hunting_bow', name: 'Hunting Bow', category: 'weapons', stackable: false, baseValue: 45, weight: 1.5, slot: 'mainHand', combat: { kind: 'weapon', skill: 'perception', damageBase: 4, damageSpread: 4, nonlethalCapable: false, ranged: true } },
   // armor
-  leather_cap: { id: 'leather_cap', name: 'Leather Cap', category: 'armor', stackable: false, baseValue: 12, weight: 0.8, slot: 'head' },
-  leather_jerkin: { id: 'leather_jerkin', name: 'Leather Jerkin', category: 'armor', stackable: false, baseValue: 30, weight: 4.0, slot: 'chest' },
-  leather_boots: { id: 'leather_boots', name: 'Leather Boots', category: 'armor', stackable: false, baseValue: 15, weight: 1.5, slot: 'shoes' },
-  traveler_gloves: { id: 'traveler_gloves', name: "Traveler's Gloves", category: 'armor', stackable: false, baseValue: 8, weight: 0.4, slot: 'gloves' },
-  iron_shield: { id: 'iron_shield', name: 'Iron Shield', category: 'armor', stackable: false, baseValue: 40, weight: 6.0, slot: 'offHand' },
+  leather_cap: { id: 'leather_cap', name: 'Leather Cap', category: 'armor', stackable: false, baseValue: 12, weight: 0.8, slot: 'head', combat: { kind: 'armor', armor: 1 } },
+  leather_jerkin: { id: 'leather_jerkin', name: 'Leather Jerkin', category: 'armor', stackable: false, baseValue: 30, weight: 4.0, slot: 'chest', combat: { kind: 'armor', armor: 3 } },
+  leather_boots: { id: 'leather_boots', name: 'Leather Boots', category: 'armor', stackable: false, baseValue: 15, weight: 1.5, slot: 'shoes', combat: { kind: 'armor', armor: 1 } },
+  traveler_gloves: { id: 'traveler_gloves', name: "Traveler's Gloves", category: 'armor', stackable: false, baseValue: 8, weight: 0.4, slot: 'gloves', combat: { kind: 'armor', armor: 1 } },
+  iron_shield: { id: 'iron_shield', name: 'Iron Shield', category: 'armor', stackable: false, baseValue: 40, weight: 6.0, slot: 'offHand', combat: { kind: 'armor', armor: 2 } },
   // jewelry & curios (misc)
   copper_ring: { id: 'copper_ring', name: 'Copper Ring', category: 'misc', stackable: false, baseValue: 10, weight: 0.1, slot: 'ring' },
   bone_amulet: { id: 'bone_amulet', name: 'Bone Amulet', category: 'misc', stackable: false, baseValue: 14, weight: 0.2, slot: 'necklace' },
@@ -57,8 +70,8 @@ export const ITEM_DEFS = deepFreeze({
   bread: { id: 'bread', name: 'Bread Loaf', category: 'consumables', stackable: true, baseValue: 2, weight: 0.5 },
   dried_meat: { id: 'dried_meat', name: 'Dried Meat', category: 'consumables', stackable: true, baseValue: 4, weight: 0.4 },
   ale: { id: 'ale', name: 'Bottle of Ale', category: 'consumables', stackable: true, baseValue: 3, weight: 1.0 },
-  healing_salve: { id: 'healing_salve', name: 'Healing Salve', category: 'consumables', stackable: true, baseValue: 18, weight: 0.3 },
-  lesser_healing_potion: { id: 'lesser_healing_potion', name: 'Lesser Healing Potion', category: 'consumables', stackable: true, baseValue: 35, weight: 0.5 },
+  healing_salve: { id: 'healing_salve', name: 'Healing Salve', category: 'consumables', stackable: true, baseValue: 18, weight: 0.3, combat: { kind: 'consumable', heal: 10 } },
+  lesser_healing_potion: { id: 'lesser_healing_potion', name: 'Lesser Healing Potion', category: 'consumables', stackable: true, baseValue: 35, weight: 0.5, combat: { kind: 'consumable', heal: 20 } },
   // books
   herbal_primer: { id: 'herbal_primer', name: 'Herbal Primer', category: 'books', stackable: true, baseValue: 25, weight: 1.2 },
   dockside_ballads: { id: 'dockside_ballads', name: 'Dockside Ballads', category: 'books', stackable: true, baseValue: 12, weight: 1.0 },

@@ -32,6 +32,11 @@ const WORLD_CONFIG = {
       traveling: 60,
       chatting: 1,
       exploring: 40,
+      // Combat freezes time: the ×0 multiplier means CLOCK_TICKs during an
+      // open combat contribute zero game-seconds, which also freezes an open
+      // travel leg's elapsed progress — that multiplier IS the mechanism that
+      // gates TRAVEL_ARRIVED behind combat resolution (engines/combatEngine.js).
+      combat: 0,
     },
   },
   calendar: {
@@ -152,6 +157,22 @@ const WORLD_CONFIG = {
       baseGoldByTier: { hamlet: 80, village: 150, town: 300, city: 600, capital: 1000 },
       maxStackQty: 5,
     },
+  },
+  // Combat TUNING only (engines/combatEngine.js): hit/damage/flee constants.
+  // Enemy archetypes, encounter templates, and per-item combat stats are
+  // shipped CODE (engines/combatData.js, engines/economyData.js) on the same
+  // no-save-bloat argument as the economy catalog. Committed combat events
+  // carry their fully resolved rolls and damage, so retuning these constants
+  // never rewrites history.
+  combat: {
+    hitBase: 0.65,
+    hitPerSkillPoint: 0.05,
+    hitFloor: 0.15,
+    hitCeiling: 0.95,
+    nonlethalDamageFactor: 0.5,
+    fleeBaseChance: 0.5,
+    fleePerAgilityPoint: 0.03,
+    unarmed: { damageBase: 1, damageSpread: 2 },
   },
   // Top-level SIBLING of worldMap on purpose: worldMap.* is seed-locked
   // generation config; raceRegistry is the DEFAULTS of a live, player-editable

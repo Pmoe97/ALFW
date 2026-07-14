@@ -19,6 +19,7 @@ import { createFactionEngine } from '../engines/factionEngine.js';
 import { createNpcGeneratorEngine, deriveScheduleState } from '../engines/npcGeneratorEngine.js';
 import { createTravelEngine } from '../engines/travelEngine.js';
 import { createEconomyEngine } from '../engines/economyEngine.js';
+import { createCombatEngine } from '../engines/combatEngine.js';
 import { createQuestEngine } from '../engines/questEngine.js';
 import { createTickSource } from './tickSource.js';
 import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from '../actions/playerActions.js';
@@ -46,8 +47,14 @@ const presence = {
 };
 createMemoryEngine(world, registry, presence);
 
-const travel = createTravelEngine(world, map, poi);
+// Economy and combat are constructed BEFORE travel: travel takes the combat
+// engine as an optional collaborator (to route requires-a-real-turn incidents
+// into real fights), and combat takes economy (equipped-item stats, loot).
 const economy = createEconomyEngine(world, registry);
+const combat = createCombatEngine(world, {
+  playerId: rowan.id, registry, map, economy, relationships, faction,
+});
+const travel = createTravelEngine(world, map, poi, combat);
 // The quest engine dispatches through the engines above (POI injection on
 // accept, economy/relationship/faction rewards on turn-in), so it is
 // constructed last, with all of them live.
@@ -88,7 +95,7 @@ const ctx = {
   npc: mira,
   merchant: sable,
   merchantShopRef,
-  engines: { map, poi, clock, faction, npcGen, travel, relationships, conversationHistory, races, registry, economy, quests },
+  engines: { map, poi, clock, faction, npcGen, travel, relationships, conversationHistory, races, registry, economy, combat, quests },
   actions: {
     startDialogue,
     endDialogue,
@@ -107,6 +114,9 @@ const ctx = {
     acceptQuest: (questId) => quests.acceptQuest(questId),
     turnInQuest: (questId) => quests.completeQuest(questId),
     abandonQuest: (questId) => quests.abandonQuest(questId),
+    // Combat verbs — resolve one round / use a consumable, all as Rowan.
+    combatAct: (action) => combat.act(action),
+    consumeItem: (defId) => combat.consumeItem(rowan.id, defId),
   },
   getDialogue,
   knownNpcIds: [mira.id, sable.id],

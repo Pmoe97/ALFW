@@ -116,6 +116,22 @@ import {
   deriveObjectiveProgress,
 } from './engines/questEngine.js';
 import { QUEST_DEFS, getQuestDef, questIds, OBJECTIVE_TYPES } from './engines/questData.js';
+import {
+  createCombatEngine,
+  deriveMaxHp,
+  deriveCombatCount,
+  deriveEncounter,
+  deriveActiveCombat,
+  deriveVitalsMap,
+  deriveCombatHistory,
+} from './engines/combatEngine.js';
+import {
+  ARCHETYPES,
+  ENCOUNTER_TEMPLATES,
+  INCIDENT_ENCOUNTERS,
+  getArchetype,
+  getEncounterTemplate,
+} from './engines/combatData.js';
 import { INVENTORY_CATEGORIES, CRAFT_STATIONS } from './game/ui/model.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
@@ -3877,6 +3893,309 @@ console.log(`QU-final PASSED: Section QU produced identical output (${sectionQuL
 console.log('\nSection QU PASSED: quest lifecycle is log-backed and derived (available → active → completed | failed), objectives are pure log-replay matches over real underlying events, acceptance is the first real caller of injectPoi/grantRevealAuthority, and completion pays only through the existing economy/relationship/faction systems with the status fact committed last');
 
 // =============================================================================
+// Section CB: combat & resolution — HP/vitals, turn resolution, the
+// lethal/nonlethal fork, the travel handoff, and rebuildability, all on the
+// same (config + log) discipline. Run twice, asserted byte-identical.
+//
+// The fixture forces incidents into real fights (incidentChance 1, one mapped
+// category, thresholds met) so the travel handoff is exercised deterministically,
+// and drives fights through the real act() verb. Everything a fight commits —
+// rosters, rolls, damage, hp, loot, consequences — is a fact in the log, so a
+// mid-fight save round-trips (SL18) and two identical runs produce identical
+// logs. Enemies are lightweight combatant records (never registry entities),
+// their full stat block committed in COMBAT_STARTED.
+// =============================================================================
+function runSectionCB(record) {
+  // Shipped config, cloned + mutated per sub-case. A plain build (no save)
+  // reads the shipped WORLD_CONFIG with no drift warning.
+  const cbBase = buildSampleWorld().world.getState().config;
+
+  // cbBuild — a fresh combat-capable world under a (possibly mutated) config,
+  // wired in game/app.js order (economy → combat → travel). Silent: the forced
+  // config drifts from the shipped one, and that warning is expected noise here.
+  function cbBuild(mutate) {
+    const config = structuredClone(cbBase);
+    if (mutate) mutate(config);
+    let fan;
+    captureConsole(() => { fan = buildSampleWorld({ save: { config, eventLog: [] } }); });
+    createRelationshipEffectEngine(fan.world, fan.relationships);
+    const map = createWorldMapEngine(fan.world);
+    const poi = createPoiEngine(fan.world);
+    const clock = createWorldClockEngine(fan.world);
+    const faction = createFactionEngine(fan.world);
+    const economy = createEconomyEngine(fan.world, fan.registry);
+    const combat = createCombatEngine(fan.world, {
+      playerId: fan.rowan.id, registry: fan.registry, map, economy, relationships: fan.relationships, faction,
+    });
+    const travel = createTravelEngine(fan.world, map, poi, combat);
+    map.materializeNeighbors(travel.getPlayerNodeId());
+    return { fan, world: fan.world, rowanId: fan.rowan.id, map, poi, clock, faction, economy, combat, travel };
+  }
+
+  // Force every leg into a fight of one mapped category:intensity.
+  const forceIncident = (category, intensity) => (config) => {
+    config.travel.incident.incidentChance = 1;
+    config.travel.incident.categories = { [category]: { weight: 1 } };
+    config.travel.incident.intensityWeights = { [String(intensity)]: 1 };
+    config.travel.incident.turnIntensityByCategory = { [category]: intensity };
+  };
+  const cbGiveWeapon = (w, defId) => {
+    w.economy.grantItems(w.rowanId, { instanceDefIds: [defId] }, 'cb');
+    const inst = w.economy.getInventory(w.rowanId).instances.find((i) => i.itemDefId === defId);
+    w.economy.equip(w.rowanId, 'mainHand', inst.instanceId);
+    return inst.instanceId;
+  };
+  const cbFirstLiveEnemy = (combat) => {
+    const a = combat.getActiveCombat();
+    return a.combatants.find((c) => c.side === 'enemy' && (c.status ?? 'alive') === 'alive') ?? null;
+  };
+  const cbStartTravelLeg = (w) => {
+    const node = w.map.getNode(w.travel.getPlayerNodeId());
+    const dest = node.edges.find((e) => w.map.getNode(e.to)?.passable).to;
+    w.travel.startTravel(dest);
+    return dest;
+  };
+
+  // --- CB1: content closure — every archetype, template, incident mapping,
+  // and consumable resolves against the REAL item catalog it ships with, and
+  // max HP is a positive function of real stats for every combatant.
+  {
+    for (const [id, arch] of Object.entries(ARCHETYPES)) {
+      assert.equal(getArchetype(id), arch, `archetype ${id} resolves`);
+      const caps = { capabilities: { attributes: arch.attributes, skills: { primary: arch.skills, secondary: {} } } };
+      assert.ok(deriveMaxHp(caps) > 0, `archetype ${id} has positive max HP`);
+      let hasWeapon = !!arch.naturalWeapon;
+      for (const defId of arch.equipmentDefIds ?? []) {
+        const def = getItemDef(defId);
+        assert.ok(def.combat, `archetype ${id} equipment ${defId} has a combat block`);
+        if (def.combat.kind === 'weapon') hasWeapon = true;
+      }
+      assert.ok(hasWeapon, `archetype ${id} has a weapon (natural or equipped)`);
+    }
+    for (const [id, tmpl] of Object.entries(ENCOUNTER_TEMPLATES)) {
+      assert.equal(getEncounterTemplate(id), tmpl, `template ${id} resolves`);
+      assert.ok(tmpl.enemies.length > 0, `template ${id} has enemies`);
+      for (const a of tmpl.enemies) assert.ok(ARCHETYPES[a], `template ${id} enemy ${a} is a real archetype`);
+    }
+    for (const [key, templateId] of Object.entries(INCIDENT_ENCOUNTERS)) {
+      const [cat, intStr] = key.split(':');
+      assert.ok(cat && Number(intStr) >= 1, `incident key ${key} parses to category:intensity`);
+      assert.ok(ENCOUNTER_TEMPLATES[templateId], `incident ${key} maps to a real template`);
+    }
+    for (const defId of ['healing_salve', 'lesser_healing_potion']) {
+      assert.equal(getItemDef(defId).combat.kind, 'consumable', `${defId} is a combat consumable`);
+      assert.ok(getItemDef(defId).combat.heal > 0, `${defId} heals a positive amount`);
+    }
+    const cbTrio = cbBuild();
+    for (const e of [cbTrio.fan.mira, cbTrio.fan.rowan, cbTrio.fan.sable]) {
+      assert.ok(deriveMaxHp(e) > 0, `${e.id} has positive max HP`);
+    }
+    record(`CB1 PASSED: ${Object.keys(ARCHETYPES).length} archetypes, ${Object.keys(ENCOUNTER_TEMPLATES).length} templates, ${Object.keys(INCIDENT_ENCOUNTERS).length} incident mappings all resolve against the real catalog; max HP positive for every combatant`);
+  }
+
+  // --- CB2: determinism — the seeded encounter roll is pure (twice-identical),
+  // and two identically-built worlds running the identical scripted fight
+  // produce byte-identical event logs.
+  {
+    const w = cbBuild();
+    const node = w.map.getOriginNode();
+    const e1 = deriveEncounter(w.world.getState().config, node, 'tmpl_bandit_gang', 0);
+    const e2 = deriveEncounter(w.world.getState().config, node, 'tmpl_bandit_gang', 0);
+    assert.deepEqual(e1, e2, 'deriveEncounter is pure (twice-identical)');
+
+    function cbScriptedFight() {
+      const g = cbBuild();
+      cbGiveWeapon(g, 'iron_sword');
+      g.combat.startCombat('tmpl_bandit_ambush', g.map.getOriginNode());
+      for (let i = 0; g.combat.getActiveCombat() && i < 60; i++) {
+        const en = cbFirstLiveEnemy(g.combat);
+        g.combat.act(en ? { type: 'attackLethal', targetId: en.id } : { type: 'wait' });
+      }
+      return g.world.getEventLog();
+    }
+    assert.deepEqual(cbScriptedFight(), cbScriptedFight(), 'two identical worlds → byte-identical fight logs');
+    record('CB2 PASSED: deriveEncounter is pure and two identically-seeded worlds produce byte-identical fight logs');
+  }
+
+  // --- CB3: travel handoff + lethal victory, end to end. The leg commits
+  // TRAVEL_INCIDENT{outcome:combat} then COMBAT_STARTED; ticks during the fight
+  // add zero game-time and the leg never arrives; each act() appends exactly one
+  // COMBAT_ROUND_RESOLVED; on victory loot is granted once (reason = combatId),
+  // COMBAT_ENDED is last, and only then does the leg resume and arrive.
+  {
+    const w = cbBuild(forceIncident('bandit', 2));
+    cbGiveWeapon(w, 'iron_sword');
+    const origin = w.travel.getPlayerNodeId();
+    const dest = cbStartTravelLeg(w);
+
+    const log0 = w.world.getEventLog();
+    const inc = w.travel.getIncident(0);
+    assert.equal(inc.outcome, 'combat', 'the leg routes to combat');
+    const startedIdx = log0.findIndex((e) => e.type === 'COMBAT_STARTED');
+    const incidentIdx = log0.findIndex((e) => e.type === 'TRAVEL_INCIDENT');
+    assert.ok(incidentIdx >= 0 && startedIdx === incidentIdx + 1, 'COMBAT_STARTED immediately follows the incident');
+    assert.ok(w.combat.getActiveCombat(), 'a fight is open');
+
+    const gsBefore = w.clock.getTotalGameSeconds();
+    for (let i = 0; i < 4; i++) w.world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 });
+    assert.equal(w.clock.getTotalGameSeconds(), gsBefore, 'combat ticks add zero game-time (×0 dilation)');
+    assert.equal(w.travel.getActiveActivity().elapsedGameSeconds, 0, 'the leg is frozen during combat');
+    assert.equal(w.travel.getPlayerNodeId(), origin, 'no arrival mid-combat');
+    assert.equal(w.world.getEventLog().filter((e) => e.type === 'TRAVEL_ARRIVED').length, 0, 'no TRAVEL_ARRIVED before COMBAT_ENDED');
+
+    let rounds = 0;
+    let combatId = w.combat.getActiveCombat().combatId;
+    while (w.combat.getActiveCombat()) {
+      const before = w.world.getEventLog().filter((e) => e.type === 'COMBAT_ROUND_RESOLVED').length;
+      const en = cbFirstLiveEnemy(w.combat);
+      const r = w.combat.act(en ? { type: 'attackLethal', targetId: en.id } : { type: 'wait' });
+      assert.ok(r.ok, 'each act resolves');
+      const after = w.world.getEventLog().filter((e) => e.type === 'COMBAT_ROUND_RESOLVED').length;
+      assert.equal(after, before + 1, 'each act appends exactly one COMBAT_ROUND_RESOLVED');
+      rounds++;
+      if (rounds > 60) throw new Error('CB3 fight never ended');
+    }
+    const ended = w.world.getEventLog().filter((e) => e.type === 'COMBAT_ENDED');
+    assert.equal(ended.length, 1, 'exactly one COMBAT_ENDED');
+    assert.equal(ended[0].payload.outcome, 'victory', 'the armed player wins');
+    const goldGrants = w.world.getEventLog().filter((e) => e.type === 'GOLD_GRANTED' && e.payload.reason === combatId);
+    assert.equal(goldGrants.length, 1, 'loot gold granted exactly once, keyed by combatId');
+    // COMBAT_ENDED is the last combat event (after loot).
+    const log1 = w.world.getEventLog();
+    assert.ok(log1.findLastIndex((e) => e.type === 'COMBAT_ENDED') > log1.findLastIndex((e) => e.type === 'GOLD_GRANTED' && e.payload.reason === combatId), 'COMBAT_ENDED commits after loot');
+
+    for (let i = 0; w.travel.getActiveActivity() && i < 500; i++) w.world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 });
+    assert.equal(w.travel.getPlayerNodeId(), dest, 'the leg resumes and arrives after the fight');
+    record(`CB3 PASSED: travel→combat handoff — incident routed to combat, ${rounds} rounds resolved (one event each), time frozen mid-fight, loot granted once, and the leg arrived only after COMBAT_ENDED`);
+  }
+
+  // --- CB4: the nonlethal fork — subduing the drifter yields a DISTINCT
+  // 'subdued' terminal state (not 'dead'), COMBAT_ENDED mode 'nonlethal', and
+  // the template's obedience consequence lands once through the real
+  // relationship system (rebuild agrees).
+  {
+    const w = cbBuild(forceIncident('npc', 3));
+    cbGiveWeapon(w, 'oak_staff'); // nonlethalCapable — subdues at full damage
+    cbStartTravelLeg(w);
+    const enemyId = w.combat.getActiveCombat().combatants.find((c) => c.side === 'enemy').id;
+    for (let i = 0; w.combat.getActiveCombat() && i < 60; i++) {
+      const en = cbFirstLiveEnemy(w.combat);
+      w.combat.act(en ? { type: 'attackNonlethal', targetId: en.id } : { type: 'wait' });
+    }
+    const h = w.combat.getCombatHistory().at(-1);
+    assert.equal(h.outcome, 'victory', 'the drifter fight is won');
+    assert.equal(h.mode, 'nonlethal', 'the finishing blow was nonlethal');
+    assert.equal(h.finalStatuses[enemyId], 'subdued', "the enemy is 'subdued' — distinct from 'dead'");
+    assert.notEqual(h.finalStatuses[enemyId], 'dead', 'subdued is not dead');
+    const rel = w.fan.relationships.getRelationship(enemyId, w.rowanId);
+    assert.equal(rel.stats.obedience, 20, 'the subdue consequence set obedience +20 through the real relationship system');
+    assert.deepEqual(w.fan.relationships.rebuildRelationshipStats(enemyId, w.rowanId), rel.stats, 'relationship cache equals its rebuild');
+    const relEvents = w.world.getEventLog().filter((e) => e.type === 'RELATIONSHIP_EVENT' && e.payload.fromId === enemyId && e.payload.toId === w.rowanId);
+    assert.equal(relEvents.length, 1, 'the consequence dispatched exactly once');
+    record("CB4 PASSED: nonlethal subdue yields a distinct 'subdued' terminal state and mode, and the obedience consequence landed once through the real relationship system");
+  }
+
+  // --- CB5: flee, both ways. fleeBaseChance 1 → flee succeeds, outcome 'fled',
+  // enemies stay active, and the travel leg still arrives. fleeBaseChance 0 →
+  // flee fails, the fight stays open, and the round still resolves the enemies.
+  {
+    const wYes = cbBuild((c) => { forceIncident('bandit', 2)(c); c.combat.fleeBaseChance = 1; });
+    cbGiveWeapon(wYes, 'iron_dagger');
+    const dest = cbStartTravelLeg(wYes);
+    const r = wYes.combat.act({ type: 'flee' });
+    assert.ok(r.ok && r.outcome === 'fled', 'guaranteed flee succeeds');
+    const hYes = wYes.combat.getCombatHistory().at(-1);
+    assert.equal(hYes.outcome, 'fled', 'combat ends fled');
+    for (const [id, st] of Object.entries(hYes.finalStatuses)) {
+      if (id !== wYes.rowanId) assert.equal(st, 'alive', 'fled-from enemies remain active');
+    }
+    for (let i = 0; wYes.travel.getActiveActivity() && i < 500; i++) wYes.world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 });
+    assert.equal(wYes.travel.getPlayerNodeId(), dest, 'the leg still arrives after fleeing');
+
+    const wNo = cbBuild((c) => { forceIncident('bandit', 2)(c); c.combat.fleeBaseChance = 0; c.combat.fleePerAgilityPoint = 0; });
+    cbGiveWeapon(wNo, 'iron_dagger');
+    cbStartTravelLeg(wNo);
+    const rNo = wNo.combat.act({ type: 'flee' });
+    assert.ok(rNo.ok && !rNo.ended, 'a failed flee does not end the fight');
+    assert.ok(wNo.combat.getActiveCombat(), 'the fight stays open after a failed flee');
+    const lastRound = wNo.world.getEventLog().filter((e) => e.type === 'COMBAT_ROUND_RESOLVED').at(-1);
+    assert.ok(lastRound.payload.actions.some((a) => a.actorId !== wNo.rowanId), 'enemies still act in the failed-flee round');
+    record('CB5 PASSED: guaranteed flee ends the fight (enemies left active) and the leg still arrives; a failed flee keeps the fight open with enemies still acting');
+  }
+
+  // --- CB6: player defeat — an unarmed player who only waits is killed; the
+  // fight ends 'defeat', vitals read 'dead', isPlayerDefeated() gates further
+  // verbs, and the vitals cache equals its rebuild.
+  {
+    const w = cbBuild(forceIncident('animal', 3)); // wolf pack vs an unarmed, passive player
+    cbStartTravelLeg(w);
+    for (let i = 0; w.combat.getActiveCombat() && i < 200; i++) w.combat.act({ type: 'wait' });
+    assert.ok(!w.combat.getActiveCombat(), 'the fight ended');
+    const h = w.combat.getCombatHistory().at(-1);
+    assert.equal(h.outcome, 'defeat', 'a passive unarmed player is defeated');
+    assert.equal(w.combat.getVitals(w.rowanId).status, 'dead', 'the player reads dead');
+    assert.ok(w.combat.isPlayerDefeated(), 'isPlayerDefeated() is true');
+    assert.equal(w.combat.act({ type: 'wait' }).ok, false, 'further act() is rejected once defeated');
+    assert.throws(() => w.combat.startCombat('tmpl_wolf_pack', w.map.getOriginNode()), /defeated/, 'starting a new fight is rejected once defeated');
+    assert.equal(w.combat.rebuildVitals().get(w.rowanId).status, 'dead', 'the vitals rebuild agrees the player is dead');
+    record('CB6 PASSED: a passive unarmed player is defeated — outcome defeat, vitals dead, further verbs gated, vitals rebuild agrees');
+  }
+
+  // --- CB7: equipment matters + rebuildability. Same seed, armed vs unarmed:
+  // the committed first-round damage facts differ. And mid- AND post-fight,
+  // every combat cache equals its own from-scratch rebuild.
+  {
+    function cbFirstStrike(giveWeaponDefId) {
+      const g = cbBuild();
+      if (giveWeaponDefId) cbGiveWeapon(g, giveWeaponDefId);
+      g.combat.startCombat('tmpl_bandit_ambush', g.map.getOriginNode());
+      const en = cbFirstLiveEnemy(g.combat);
+      g.combat.act({ type: 'attackLethal', targetId: en.id });
+      const round0 = g.world.getEventLog().find((e) => e.type === 'COMBAT_ROUND_RESOLVED');
+      const playerAction = round0.payload.actions.find((a) => a.actorId === g.rowanId);
+      return { g, playerAction };
+    }
+    const armed = cbFirstStrike('iron_sword');
+    const unarmed = cbFirstStrike(null);
+    assert.equal(armed.playerAction.weaponDefId, 'iron_sword', 'armed strike records the weapon');
+    assert.equal(unarmed.playerAction.weaponDefId, null, 'unarmed strike records no weapon');
+    assert.notDeepEqual(
+      { hit: armed.playerAction.hit, dmg: armed.playerAction.damage },
+      { hit: unarmed.playerAction.hit, dmg: unarmed.playerAction.damage },
+      'equipment changes the committed combat facts (a sword hits harder than fists)'
+    );
+
+    // Rebuildability, mid-fight (armed.g still open).
+    assert.deepEqual(armed.g.combat.getActiveCombat(), armed.g.combat.rebuildActiveCombat(), 'mid-fight active-combat cache equals its rebuild');
+    const vmid = armed.g.combat.rebuildVitals();
+    for (const id of vmid.keys()) assert.deepEqual(armed.g.combat.getVitals(id), vmid.get(id), `mid-fight vitals cache for ${id} equals its rebuild`);
+    assert.deepEqual(armed.g.combat.getCombatHistory(), armed.g.combat.rebuildCombatHistory(), 'mid-fight history cache equals its rebuild');
+    // Finish it and re-check post-fight.
+    for (let i = 0; armed.g.combat.getActiveCombat() && i < 60; i++) {
+      const en = cbFirstLiveEnemy(armed.g.combat);
+      armed.g.combat.act(en ? { type: 'attackLethal', targetId: en.id } : { type: 'wait' });
+    }
+    assert.equal(armed.g.combat.getActiveCombat(), null, 'the fight is over');
+    assert.equal(armed.g.combat.rebuildActiveCombat(), null, 'post-fight active rebuild is null');
+    assert.deepEqual(armed.g.combat.getCombatHistory(), armed.g.combat.rebuildCombatHistory(), 'post-fight history cache equals its rebuild');
+    const vend = armed.g.combat.rebuildVitals();
+    for (const id of vend.keys()) assert.deepEqual(armed.g.combat.getVitals(id), vend.get(id), `post-fight vitals cache for ${id} equals its rebuild`);
+    record('CB7 PASSED: equipment changes committed combat facts (sword vs fists), and every combat cache equals its from-scratch rebuild mid- and post-fight');
+  }
+
+  return { log: cbBuild(forceIncident('bandit', 2)).world.getEventLog() };
+}
+
+const sectionCbLinesA = [];
+runSectionCB((m) => { sectionCbLinesA.push(m); console.log(m); });
+const sectionCbLinesB = [];
+runSectionCB((m) => sectionCbLinesB.push(m));
+assert.deepEqual(sectionCbLinesA, sectionCbLinesB, 'Section CB output must be byte-identical across two full runs');
+console.log(`CB-final PASSED: Section CB produced identical output (${sectionCbLinesA.length} lines) across two full runs`);
+
+console.log('\nSection CB PASSED: combat is log-backed and derived (vitals, active fight, history all pure folds), turns resolve one atomic event per decision with seeded fixed-draw rolls, the lethal/nonlethal fork yields distinct persisted outcomes, equipment drives the math through real equipped-item data, travel routes requires-a-real-turn incidents into real fights that freeze the leg until resolved, and every cache equals its from-scratch rebuild');
+
+// =============================================================================
 // Section SL: save/load — round-tripping the ENTIRE world state.
 //
 // The architecture's core promise, put on trial end to end: raw state is
@@ -3937,12 +4256,18 @@ function slWireEngines(fan) {
         (id) => deriveScheduleState(fan.registry.get(id)?.schedule, clock.getCurrentDate().hour).available
       ),
   });
-  const travel = createTravelEngine(fan.world, map, poi);
+  // Economy + combat BEFORE travel, matching game/app.js: travel takes combat
+  // as its optional collaborator (routing requires-a-real-turn incidents into
+  // real fights), and combat takes economy (equipped-item stats, loot).
   const economy = createEconomyEngine(fan.world, fan.registry);
+  const combat = createCombatEngine(fan.world, {
+    playerId: fan.rowan.id, registry: fan.registry, map, economy, relationships: fan.relationships, faction,
+  });
+  const travel = createTravelEngine(fan.world, map, poi, combat);
   const quests = createQuestEngine(fan.world, {
     playerId: fan.rowan.id, economy, relationships: fan.relationships, faction, poi, travel,
   });
-  return { effects, map, poi, faction, npcGen, memory, clock, travel, economy, quests };
+  return { effects, map, poi, faction, npcGen, memory, clock, travel, economy, combat, quests };
 }
 
 // slBuildLivedInWorld — build a fresh world and LIVE in it: a representative
@@ -4092,9 +4417,25 @@ async function slBuildLivedInWorld() {
       world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 });
     }
   }
+  // A leg may now roll a real fight (travel is wired to combat). Resolve any
+  // open fight deterministically (always attack-lethal the first live enemy)
+  // so the lived-in world settles — leaving it open would freeze the leg (the
+  // combat timeContext ×0) and slTickToArrival would spin forever. Deterministic,
+  // so SL1's two-run byte-identity holds.
+  const { combat: slCombat } = engines;
+  function slResolveCombatIfAny() {
+    for (let i = 0; slCombat.getActiveCombat(); i++) {
+      if (i > 200) throw new Error('SL: a travel-incident combat never resolved');
+      const active = slCombat.getActiveCombat();
+      const enemy = active.combatants.find((c) => c.side === 'enemy' && (c.status ?? 'alive') === 'alive');
+      slCombat.act(enemy ? { type: 'attackLethal', targetId: enemy.id } : { type: 'wait' });
+      if (slCombat.isPlayerDefeated()) break;
+    }
+  }
 
   globalThis.generateText = slStubGenerateText;
   travel.startTravel(slNextDest());
+  slResolveCombatIfAny(); // no-op unless this leg rolled a real fight
   for (let i = 0; slTravelEnhancements < 1; i++) {
     if (i > 2000) throw new Error('SL: travel narration never settled');
     await new Promise((r) => setTimeout(r, 5));
@@ -4103,9 +4444,11 @@ async function slBuildLivedInWorld() {
   slTickToArrival('leg one');
 
   travel.startTravel(slNextDest()); // no plugin: the fallback narration stays
+  slResolveCombatIfAny();
   slTickToArrival('leg two');
 
   travel.startTravel(slNextDest());
+  slResolveCombatIfAny(); // resolve any fight FIRST, so the leg (not a combat) is what's left open
   world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 }); // partial progress only
   assert.ok(travel.getActiveActivity(), 'SL leaves leg three open — the save must capture an in-transit activity');
 
@@ -4404,7 +4747,71 @@ assert.equal(
 );
 console.log('SL17 PASSED: quests round-trip — the completed and the open contract, objective progress, injected POI + reveal authority, loaded cache equals its rebuild, and load re-granted nothing');
 
-console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read (inventory, gold, shop stock, and quest state included) matches the original exactly');
+// --- SL18: an IN-PROGRESS combat round-trips and RESUMES, the travel-leg
+// precedent (SL15) extended to a mid-fight save. A forced-combat world starts a
+// leg that opens a fight; ONE round is resolved, then the world is serialized
+// mid-fight. The reconstruction must restore the open fight exactly (roster hp,
+// statuses, round, turn order), its caches must equal their own rebuilds, load
+// must re-grant NO loot, and continuing the identical act() script must drive
+// both worlds to a byte-identical finish that then resumes and arrives the leg.
+function slBuildMidCombatWorld() {
+  const cfg = structuredClone(slA.world.getState().config);
+  cfg.travel.incident.incidentChance = 1;
+  cfg.travel.incident.categories = { bandit: { weight: 1 } };
+  cfg.travel.incident.intensityWeights = { 2: 1 };
+  cfg.travel.incident.turnIntensityByCategory = { bandit: 2 };
+  let fan;
+  captureConsole(() => { fan = buildSampleWorld({ save: { config: cfg, eventLog: [] } }); });
+  const engines = slWireEngines(fan);
+  const { map, travel, combat, economy } = engines;
+  map.materializeNeighbors(travel.getPlayerNodeId());
+  // Arm the player (empty-log save skips the seed grants), then start a leg —
+  // which opens a fight — and resolve exactly ONE round.
+  economy.grantItems(fan.rowan.id, { instanceDefIds: ['iron_sword'] }, 'sl18');
+  economy.equip(fan.rowan.id, 'mainHand', economy.getInventory(fan.rowan.id).instances[0].instanceId);
+  const node = map.getNode(travel.getPlayerNodeId());
+  travel.startTravel(node.edges.find((e) => map.getNode(e.to)?.passable).to);
+  assert.ok(combat.getActiveCombat(), 'SL18 fixture must open a fight on the leg');
+  const enemy = combat.getActiveCombat().combatants.find((c) => c.side === 'enemy');
+  combat.act({ type: 'attackLethal', targetId: enemy.id });
+  assert.ok(combat.getActiveCombat(), 'SL18 saves mid-fight — the fight must still be open after one round');
+  return { ...fan, ...engines };
+}
+
+const sl18A = slBuildMidCombatWorld();
+const sl18SaveText = serializeWorld(sl18A.world);
+const sl18Loaded = buildSampleWorld({ save: parseSave(sl18SaveText) });
+const sl18L = { ...sl18Loaded, ...slWireEngines(sl18Loaded) };
+
+// The open fight round-trips exactly, and its caches equal their own rebuilds.
+assert.deepEqual(sl18L.combat.getActiveCombat(), sl18A.combat.getActiveCombat(), 'the open fight (roster hp, statuses, round, turn order) must round-trip');
+assert.deepEqual(sl18L.combat.rebuildActiveCombat(), sl18L.combat.getActiveCombat(), 'loaded active-combat cache equals its own rebuild');
+assert.deepEqual(sl18L.combat.rebuildCombatHistory(), sl18L.combat.getCombatHistory(), 'loaded combat-history cache equals its own rebuild');
+assert.deepEqual(sl18L.combat.rebuildVitals(), sl18A.combat.rebuildVitals(), 'loaded vitals equal the original');
+// Load re-granted nothing — no loot events exist yet (the fight is unresolved).
+assert.equal(sl18L.world.getEventLog().filter((e) => e.type === 'COMBAT_ENDED').length, 0, 'no fight has ended yet');
+assert.equal(sl18L.world.getEventLog().filter((e) => e.type === 'GOLD_GRANTED').length, 0, 'no loot granted before the fight resolves (priming re-granted nothing)');
+
+// Resume the SAME act() script on both worlds → byte-identical finish.
+function sl18Finish(fan) {
+  for (let i = 0; fan.combat.getActiveCombat() && i < 60; i++) {
+    const en = fan.combat.getActiveCombat().combatants.find((c) => c.side === 'enemy' && (c.status ?? 'alive') === 'alive');
+    fan.combat.act(en ? { type: 'attackLethal', targetId: en.id } : { type: 'wait' });
+  }
+}
+sl18Finish(sl18A);
+sl18Finish(sl18L);
+assert.deepEqual(sl18L.world.getEventLog(), sl18A.world.getEventLog(), 'resuming the identical fight after load yields a byte-identical log');
+const sl18Ended = sl18L.world.getEventLog().filter((e) => e.type === 'COMBAT_ENDED');
+assert.equal(sl18Ended.length, 1, 'the resumed fight ends exactly once');
+assert.equal(sl18Ended[0].payload.outcome, 'victory', 'the resumed fight is won');
+// The leg was frozen through the fight; now it resumes and arrives on both.
+const sl18Dest = sl18L.travel.getActiveActivity().toNodeId;
+for (let i = 0; sl18L.travel.getActiveActivity() && i < 500; i++) sl18L.world.dispatch('CLOCK_TICK', { realSecondsElapsed: 1 });
+assert.equal(sl18L.travel.getPlayerNodeId(), sl18Dest, 'the loaded world resumes the leg and arrives after the fight');
+console.log('SL18 PASSED: an in-progress combat round-trips (open fight, hp, statuses, round, turn order), loaded caches equal their rebuilds, load re-grants no loot, and resuming the identical fight drives a byte-identical finish that then arrives the frozen leg');
+
+console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read (inventory, gold, shop stock, quest state, and an in-progress combat included) matches the original exactly');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed

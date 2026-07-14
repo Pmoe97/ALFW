@@ -39,6 +39,12 @@ const CRAFT_COMPLETED = 'CRAFT_COMPLETED';
 const EQUIP_CHANGED = 'EQUIP_CHANGED';
 const ITEM_DROPPED = 'ITEM_DROPPED';
 const ITEMS_TRANSFERRED = 'ITEMS_TRANSFERRED';
+// Dispatched by the combat engine's consume verbs (engines/combatEngine.js).
+// Folded by TWO engines into DIFFERENT caches — the CLOCK_TICK precedent, not
+// a violation of the one-fold-path rule: this engine decrements the stack,
+// the combat engine folds payload.effect into its vitals cache. Each cache
+// still has exactly one code path writing it.
+const ITEM_CONSUMED = 'ITEM_CONSUMED';
 
 // Salt band for shop-stock draws: SHOP_STOCK_SALT + poiIndex*32 + slotIndex.
 // 200000 sits far above every band in use (terrain/classification 11–4001,
@@ -126,6 +132,12 @@ function foldEntityEvent(holdings, entry, entityId) {
       if (p.entityId !== entityId) return;
       addStacks(holdings.stacks, p.stacks, -1);
       holdings.instances = removeInstances(holdings.instances, p.instanceIds);
+      return;
+    case ITEM_CONSUMED:
+      // Consuming is dropping-with-an-effect as far as holdings go: the
+      // consumed stack goes away; the effect is the combat engine's business.
+      if (p.entityId !== entityId) return;
+      addStacks(holdings.stacks, p.stacks, -1);
       return;
     case ITEMS_TRANSFERRED:
       // One atomic hand-off between two entities (quest deliveries): the
@@ -381,6 +393,10 @@ export function createEconomyEngine(world, registry) {
     foldEntityEvent(holdingsOf(p.toId), entry, p.toId);
   }
 
+  function applyItemConsumed(entry) {
+    foldEntityEvent(holdingsOf(entry.payload.entityId), entry, entry.payload.entityId);
+  }
+
   const APPLY = {
     [GOLD_GRANTED]: applyGoldGranted,
     [ITEMS_GRANTED]: applyItemsGranted,
@@ -389,6 +405,7 @@ export function createEconomyEngine(world, registry) {
     [EQUIP_CHANGED]: applyEquipChanged,
     [ITEM_DROPPED]: applyItemDropped,
     [ITEMS_TRANSFERRED]: applyItemsTransferred,
+    [ITEM_CONSUMED]: applyItemConsumed,
   };
 
   // Prime from whatever history the log already holds (cold-start against a

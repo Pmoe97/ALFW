@@ -79,9 +79,10 @@ function overviewTab(m) {
   ] });
   const vitals = div(panelStyle('padding:12px;'), { children: [
     div(sectionLabelStyle() + ' padding-bottom:8px;', { text: 'Vitals' }),
-    div('', { unwired: m.vitals.unwired, children: [
-      vitalRow('Health'), vitalRow('Stamina'), vitalRow('Carry weight'),
-    ] }),
+    // Health is real (combat vitals fold); stamina/carry stay unwired.
+    healthRow(m.vitals.health),
+    div('', { unwired: m.vitals.stamina.unwired, children: [vitalRow('Stamina')] }),
+    div('', { unwired: m.vitals.carry.unwired, children: [vitalRow('Carry weight')] }),
   ] });
   const right = div('display:flex; flex-direction:column; gap:8px;', { children: [standing, vitals] });
 
@@ -160,6 +161,20 @@ function vitalRow(label) {
       span('font:500 11.5px Inter,sans-serif; color:var(--text-muted); width:130px; flex:none;', { text: label }),
       div(barTrackStyle(6) + ' flex:1;', { children: [div(barFillStyle(0))] }),
       span("font:600 10.5px 'Barlow Semi Condensed',sans-serif; color:var(--text-faint); width:50px; text-align:right; flex:none;", { text: '—/—' }),
+    ],
+  });
+}
+// healthRow — the wired Health vital: a red-tinted bar and hp/maxHp readout,
+// with a Dead/Subdued note when the player is in a terminal state.
+function healthRow(health) {
+  if (!health) return vitalRow('Health');
+  const color = health.status === 'dead' ? 'var(--danger)' : health.pct <= 33 ? 'var(--danger)' : health.pct <= 66 ? 'var(--accent)' : 'var(--good)';
+  const label = health.status === 'alive' ? 'Health' : `Health (${health.status})`;
+  return div('display:flex; align-items:center; gap:10px; margin-bottom:8px;', {
+    children: [
+      span('font:500 11.5px Inter,sans-serif; color:var(--text-muted); width:130px; flex:none;', { text: label }),
+      div(barTrackStyle(6) + ' flex:1;', { children: [div(barFillStyle(health.pct, color))] }),
+      span("font:600 10.5px 'Barlow Semi Condensed',sans-serif; color:var(--text-faint); width:50px; text-align:right; flex:none;", { text: `${health.hp}/${health.maxHp}` }),
     ],
   });
 }

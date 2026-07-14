@@ -14,6 +14,9 @@
 //   'auto-passthrough' — a requires-a-real-turn incident resolved as a narrated
 //                        pass-through (fought off / talked past): clearly a
 //                        real event with stakes, clearly NOT "nothing happened".
+//   'combat'           — a requires-a-real-turn incident handed off to the real
+//                        combat system: the fight is BEGINNING, its outcome not
+//                        yet decided (unlike the resolved pass-through above).
 
 import { hashString } from './fallbackDialogue.js';
 
@@ -96,6 +99,31 @@ const PASSTHROUGH_LINES = {
   },
 };
 
+// Per-category narration for the MOMENT a real fight begins (outcome:'combat').
+// Present tense, no resolution — the combat screen decides what happens next.
+const COMBAT_LINES = {
+  animal: [
+    'A snarling beast lunges from the brush and blocks the road — there is no going around it.',
+    'The undergrowth erupts: a wild animal is on you, and there is no time to run.',
+  ],
+  bandit: [
+    'Bandits step out of cover with blades drawn — this one you will have to fight.',
+    'An ambush snaps shut around you; the bandits mean to take everything you carry.',
+  ],
+  npc: [
+    'A hostile stranger draws steel and squares up — words are past their use now.',
+    'The drifter on the road turns violent without warning, forcing your hand.',
+  ],
+  environmental: [
+    'The land itself turns deadly, and there is nothing to do but face it.',
+    'A sudden hazard bars the road — you brace to fight your way through.',
+  ],
+  mundane: [
+    'What seemed routine turns to a fight before you can think.',
+    'Trouble on the road boils over into violence.',
+  ],
+};
+
 // Returned whenever the inputs are too malformed to pick a keyed line. This
 // layer must never crash the game.
 const GENERIC_LINE = 'The road carries you through without lasting trouble.';
@@ -110,6 +138,8 @@ export function fallbackTravelNarration(incident) {
     let options;
     if (incident.category === 'none') {
       options = QUIET_LINES;
+    } else if (incident.outcome === 'combat') {
+      options = COMBAT_LINES[incident.category];
     } else if (incident.outcome === 'auto-passthrough') {
       options = PASSTHROUGH_LINES[incident.passthroughFlavor][incident.category];
     } else {

@@ -308,7 +308,10 @@ export function buildCharacter(ctx) {
     attributes,        // wired
     skills,            // wired
     traits,            // wired (personalityTraits)
-    vitals: { unwired: true },     // no HP/stamina/carry system
+    // Health is now wired to the combat engine's vitals fold (max HP derived
+    // from toughness/fortitude, current HP a log fold). Stamina/carry remain
+    // unbacked, so they stay marked unwired individually.
+    vitals: buildVitals(ctx),
     standing: { unwired: true },   // no player faction-standing engine
     perks: { unwired: true },      // no perk system
     visibility: { unwired: true },
@@ -470,6 +473,86 @@ export function buildInventory(ctx, state = {}) {
     examine: { unwired: true },
     favorite: { unwired: true },
   };
+}
+
+// buildVitals — the character screen's Vitals panel. Health is real (combat
+// engine vitals fold); stamina/carry have no engine, so each is marked unwired
+// individually rather than the whole panel.
+export function buildVitals(ctx) {
+  const combat = ctx.engines?.combat;
+  const v = combat?.getVitals(ctx.player.id);
+  return {
+    health: v ? { hp: v.hp, maxHp: v.maxHp, status: v.status, pct: v.maxHp > 0 ? (v.hp / v.maxHp) * 100 : 0 } : null,
+    stamina: { unwired: true },
+    carry: { unwired: true },
+  };
+}
+
+// buildCombat — the combat screen's view-model, entirely from live combat
+// engine reads. Returns { active } (null when no fight is open), the player's
+// selectable enemy targets, the last round's action log, whether the player is
+// defeated, and the usable consumables in the pack.
+export function buildCombat(ctx) {
+  const { engines, player } = ctx;
+  const combat = engines.combat;
+  const active = combat.getActiveCombat();
+  const defeated = combat.isPlayerDefeated();
+
+  if (!active) {
+    const last = combat.getCombatHistory().at(-1) ?? null;
+    return { active: null, defeated, lastResult: last, playerVitals: combat.getVitals(player.id) };
+  }
+
+  const byId = new Map(active.combatants.map((c) => [c.id, c]));
+  const order = active.turnOrder.map((id) => {
+    const c = byId.get(id);
+    return { id, name: c.name, side: c.side, status: c.status ?? 'alive', hp: c.hp, maxHp: c.maxHp, hpPct: c.maxHp > 0 ? (c.hp / c.maxHp) * 100 : 0, initiative: c.initiative };
+  });
+  const enemies = order.filter((c) => c.side === 'enemy');
+  const playerRow = order.find((c) => c.side === 'player');
+  const liveEnemies = enemies.filter((e) => e.status === 'alive');
+
+  // Usable consumables (stackable heals) in the player's pack.
+  const inv = engines.economy.getInventory(player.id);
+  const consumables = Object.entries(inv.stacks)
+    .map(([defId, qty]) => ({ defId, qty, def: getItemDef(defId) }))
+    .filter((x) => x.def.combat?.kind === 'consumable')
+    .map((x) => ({ defId: x.defId, name: x.def.name, qty: x.qty, heal: x.def.combat.heal }));
+
+  const player_ = byId.get(player.id);
+  return {
+    active,
+    defeated,
+    order,
+    enemies,
+    liveEnemies,
+    playerRow,
+    playerWeapon: player_?.weapon ?? null,
+    round: active.round,
+    consumables,
+    // the most recent round's per-actor lines, for the log panel
+    lastActions: buildLastRoundLog(ctx, active),
+  };
+}
+
+// buildLastRoundLog — reconstruct the last COMBAT_ROUND_RESOLVED into readable
+// lines. Reads the raw log (the combat engine commits full action facts).
+function buildLastRoundLog(ctx, active) {
+  const log = ctx.world.getEventLog();
+  let last = null;
+  for (const entry of log) {
+    if (entry.type === 'COMBAT_ROUND_RESOLVED' && entry.payload.combatId === active.combatId) last = entry.payload;
+  }
+  if (!last) return [];
+  const nameOf = (id) => active.combatants.find((c) => c.id === id)?.name ?? id;
+  return last.actions.map((a) => {
+    if (a.action === 'skip' || a.action === 'wait') return `${nameOf(a.actorId)} holds.`;
+    if (a.action === 'flee') return a.fleeSuccess ? `${nameOf(a.actorId)} breaks away and flees!` : `${nameOf(a.actorId)} tries to flee, but is cut off.`;
+    if (a.action === 'useItem') return `${nameOf(a.actorId)} uses an item (+${a.healed ?? 0} HP).`;
+    if (!a.hit) return `${nameOf(a.actorId)} attacks ${nameOf(a.targetId)} — miss.`;
+    const killed = a.targetStatusAfter === 'dead' ? ' — slain!' : a.targetStatusAfter === 'subdued' ? ' — subdued!' : '';
+    return `${nameOf(a.actorId)} hits ${nameOf(a.targetId)} for ${a.damage}${killed}`;
+  });
 }
 
 // Shared: relationship tier ladder labels (for a legend, if needed).
