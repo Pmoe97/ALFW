@@ -20,6 +20,8 @@ skipped are in the Summary.
 |---|---|---|---|---|---|
 | `effectiveSkill` | `2` (attribute divisor: `raw + floor(attr / 2)`) | 206 | **AMBIGUOUS** | The identical formula is invoked both from pure live accessors (game/ui/model.js character-sheet and craft-gate display) and from call sites whose result is baked straight into a dispatched payload (combatEngine's `deriveMaxHp`/`initiativeOf`/`resolveRound` hit math → `COMBAT_STARTED`/`COMBAT_ROUND_RESOLVED`; economyEngine's `craft()` → `CRAFT_COMPLETED.skill.effective`), so the same constant is simultaneously live everywhere it's read fresh and permanently baked wherever a caller commits its output. | high |
 
+**Rebuild-fold verification:** checked every call site of `effectiveSkill` (entitySchema.js:206; combatEngine.js:88,161,335,369; economyEngine.js:576) — none sit inside a `rebuild*` function. `CRAFT_COMPLETED.skill.effective` is also never read back by any derive/rebuild function (questEngine's `craftRecipe` objective matcher only counts entries by `recipeId`); it's a write-only audit field. So the ambiguity above is strictly the live-getter-vs-dispatch-embedding caller split already described — no rebuild/replay path silently re-derives this against current config. This row needs no further work.
+
 ---
 
 ## deriveEmotion.js
@@ -66,6 +68,8 @@ skipped are in the Summary.
 
 Excluded as structural (RNG stream-separation salts, explicitly documented as such): `COMBAT_SALT`, `COMBAT_SALT_STRIDE` (combatData.js).
 
+**Rebuild-fold verification:** `deriveMaxHp`'s three call sites are lines 197 (inside `deriveEncounter`, dispatch flow), 519 (`getVitals`'s live fallback), and 541 (`dispatchStart`, dispatch flow). None of the three `rebuild*` functions on this engine (`rebuildActiveCombat`, `rebuildVitals`, `rebuildCombatHistory`, lines 728-736) call it — each just replays `p.hp`/`p.maxHp`/`p.combatants` straight out of already-stored payloads via `deriveActiveCombat`/`deriveVitalsMap`/`deriveCombatHistory`. So this row's ambiguity is confined to the live-getter-vs-dispatch-embedding split already described; no rebuild/replay path re-derives it. This row needs no further work.
+
 ---
 
 ## economyEngine.js
@@ -77,6 +81,8 @@ Excluded as structural (RNG stream-separation salts, explicitly documented as su
 | `craft()` → `effectiveSkill` | `2` (entitySchema.js divisor, called at line 576) | 576, 629 | VINTAGE-LOCKED | The computed `effective` value is stored verbatim as `CRAFT_COMPLETED.skill.effective`; see entitySchema.js's AMBIGUOUS entry for the fuller picture — this is specifically the call site that commits the number to history. | high |
 
 Excluded as structural: `32`-wide per-slot stride inside `SHOP_STOCK_SALT + poiIndex*32 + j` (RNG stream separation).
+
+**Rebuild-fold verification:** `priceFor`'s only call sites are lines 485, 493, 512, 520, all inside `resolveOffer` (used by live `quote()` and dispatch-bound `trade()`). Of the four `rebuild*` functions (`rebuildGold`, `rebuildInventory`, `rebuildEquipped`, `rebuildShopStock`, lines 716-727): the first three never touch `priceFor`; `rebuildShopStock` → `deriveShopStock` → `deriveBaselineStock` (stock composition/quantities only, no pricing) + `deriveShopDeltas` (folds already-priced `gave`/`received` amounts straight out of stored `TRADE_COMPLETED` payloads — no repricing). So no rebuild/replay path re-derives a price; the ambiguity is confined to the live-preview-vs-dispatch-embedding split already described. This row needs no further work.
 
 ---
 
