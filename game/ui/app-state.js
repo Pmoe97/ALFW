@@ -17,6 +17,7 @@ import { renderJournal } from './screens/journal.js';
 import { renderCharacter } from './screens/character.js';
 import { renderTrading } from './screens/trading.js';
 import { renderCraft } from './screens/craft.js';
+import { renderCombat } from './screens/combat.js';
 
 const SCREENS = {
   travel: renderTravel,
@@ -26,6 +27,7 @@ const SCREENS = {
   character: renderCharacter,
   trading: renderTrading,
   craft: renderCraft,
+  combat: renderCombat,
 };
 
 const INITIAL_STATE = {
@@ -42,6 +44,7 @@ const INITIAL_STATE = {
   selectedItemId: null, // an inventory row key: an instanceId or a stack's defId
   journalTab: 'log',
   characterTab: 'overview',
+  combatTargetId: null,
   craftStation: 'blacksmith',
   craftRecipeId: 'bs1',
   offerPlayerIds: [],
@@ -84,7 +87,14 @@ export function createApp(ctx, mountPoint) {
     const scrollTop = contentHost.scrollTop;
 
     clearEl(hudHost).appendChild(renderHud(ui));
-    const screenFn = SCREENS[state.screen] || SCREENS.travel;
+    // An open fight (or a defeated player) forces the combat screen and blocks
+    // navigation — WITHOUT mutating state.screen, so the player returns to
+    // wherever they were once the fight resolves. Mirrors how the combat
+    // engine's timeContext freeze blocks travel at the engine layer.
+    const combat = ctx.engines?.combat;
+    const forceCombat = combat && (combat.getActiveCombat() || combat.isPlayerDefeated());
+    const screenId = forceCombat ? 'combat' : state.screen;
+    const screenFn = SCREENS[screenId] || SCREENS.travel;
     clearEl(contentHost).appendChild(screenFn(ui));
     clearEl(debugHost).appendChild(renderDebugMenu(ui));
 

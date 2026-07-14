@@ -46,16 +46,23 @@
 //      IS the loading indicator. Under Node (no plugin) the fallback simply
 //      stays — bland but never broken.
 //
-// 'requiresRealTurn' RESOLUTION — DELIBERATELY DEFERRED HOOK.
+// 'requiresRealTurn' RESOLUTION — THE COMBAT HOOK, NOW REALIZED.
 // resolutionMode:'requiresRealTurn' marks an incident that SHOULD consume a
-// real player turn (combat, negotiation), but no combat/social resolution
-// system exists yet — exactly as poiEngine deferred "what does a discovered
-// shop DO". The roll, category, and severity are logged as real facts for
-// that future system to hook into; in THIS pass a 'requiresRealTurn' incident
-// resolves as outcome:'auto-passthrough' (fought off / talked past — clearly
-// distinct from 'none' and from 'auto' flavor) so travel never hard-blocks on
-// a system that does not exist. Swapping 'auto-passthrough' for a real turn
-// is that future system's entry point.
+// real player turn. When a combatEngine is injected (the optional 4th
+// collaborator) AND it has a real encounter mapped for this incident's
+// category:intensity, reactTravelStarted commits the incident with
+// outcome:'combat' and hands off to combatEngine.startIncidentCombat — which
+// opens a fight carrying timeContext:'combat'. Because combat's dilation
+// multiplier is 0, an open fight freezes this leg's elapsed progress, so
+// TRAVEL_ARRIVED is gated behind the fight with no special logic here.
+//
+// Everything NOT routed to combat (no combatEngine injected, or an unmapped
+// category:intensity such as environmental — a future hazard system, not a
+// fight) keeps the original behavior: outcome:'auto-passthrough' (fought off
+// / talked past — clearly distinct from 'none' and from 'auto' flavor) so
+// travel never hard-blocks. deriveTravelIncident itself is UNCHANGED (same
+// four fixed draws, same returned fields) — the routing lives entirely in
+// reactTravelStarted, so every existing seed and travel-only proof is stable.
 // Rest/making-camp is likewise its own future event type, not built here.
 
 import { mulberry32 } from '../worldState.js';
@@ -285,6 +292,8 @@ function buildNarrationPrompt(facts) {
   let event;
   if (facts.category === 'none') {
     event = 'The trip passes without incident.';
+  } else if (facts.outcome === 'combat') {
+    event = `On the way a hostile ${facts.category} encounter (severity ${facts.intensity} of 3) blocks the road and the traveler is forced to fight — narrate only the moment the fight begins; its outcome is NOT yet decided.`;
   } else if (facts.outcome === 'auto-passthrough') {
     const how = facts.passthroughFlavor === 'fought' ? 'fought it off and came through roughed up but fine' : 'talked their way past it';
     event = `On the way there is a serious ${facts.category} encounter (severity ${facts.intensity} of 3); the traveler ${how}.`;
@@ -304,7 +313,7 @@ function buildNarrationPrompt(facts) {
 // registry/presence shape): the map supplies nodes/edges/materialization, the
 // POI engine supplies the explore roll, and this engine gives both their real
 // player-facing caller.
-export function createTravelEngine(world, mapEngine, poiEngine) {
+export function createTravelEngine(world, mapEngine, poiEngine, combatEngine = null) {
   const { config } = world.getState();
   const travel = readTravel(config); // validate up front
 
@@ -421,20 +430,37 @@ export function createTravelEngine(world, mapEngine, poiEngine) {
     const fromNode = mapEngine.getNode(fromNodeId);
     const roll = deriveTravelIncident(config, fromNode, legIndex);
 
+    // Route a requires-a-real-turn incident into REAL combat when a combat
+    // engine is injected and has a mapped encounter for this exact
+    // category:intensity. Otherwise the incident keeps its rolled
+    // auto-passthrough outcome (deriveTravelIncident is untouched — the flavor
+    // draw was still consumed, so the seed stream is identical either way).
+    const toCombat = combatEngine
+      && roll.resolutionMode === 'requiresRealTurn'
+      && combatEngine.hasEncounterFor(roll.category, roll.intensity);
+
     const payload = {
       legIndex,
       fromNodeId,
       toNodeId,
       category: roll.category,
-      outcome: roll.outcome,
+      outcome: toCombat ? 'combat' : roll.outcome,
     };
     if (roll.category !== 'none') {
       payload.intensity = roll.intensity;
       payload.resolutionMode = roll.resolutionMode;
     }
-    if (roll.passthroughFlavor) payload.passthroughFlavor = roll.passthroughFlavor;
+    // passthroughFlavor is meaningless once a real fight resolves the encounter.
+    if (!toCombat && roll.passthroughFlavor) payload.passthroughFlavor = roll.passthroughFlavor;
     payload.narration = fallbackTravelNarration(payload);
     world.dispatch(TRAVEL_INCIDENT, payload);
+
+    // Hand off AFTER the incident is committed (the nested-dispatch shape the
+    // incident itself uses): opens the fight, which carries timeContext
+    // 'combat' and thereby freezes this leg until it resolves.
+    if (toCombat) {
+      combatEngine.startIncidentCombat({ legIndex, fromNode, toNodeId, category: roll.category, intensity: roll.intensity });
+    }
 
     if (typeof generateText === 'function') {
       const prompt = buildNarrationPrompt({
@@ -511,6 +537,9 @@ export function createTravelEngine(world, mapEngine, poiEngine) {
     if (cachedActivity) {
       throw new Error('TravelEngine: cannot start travel — an activity is already in progress');
     }
+    if (combatEngine?.getActiveCombat()) {
+      throw new Error('TravelEngine: cannot start travel — a combat is in progress');
+    }
     const fromNode = mapEngine.getNode(cachedPlayerNodeId);
     const edge = fromNode.edges.find((e) => e.to === toNodeId);
     if (!edge) {
@@ -542,6 +571,9 @@ export function createTravelEngine(world, mapEngine, poiEngine) {
   function startExplore() {
     if (cachedActivity) {
       throw new Error('TravelEngine: cannot explore — an activity is already in progress');
+    }
+    if (combatEngine?.getActiveCombat()) {
+      throw new Error('TravelEngine: cannot explore — a combat is in progress');
     }
     const node = mapEngine.getNode(cachedPlayerNodeId);
     const poiId = poiEngine.exploreBlind(node);

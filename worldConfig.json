@@ -11,7 +11,8 @@
       "idle": 20,
       "traveling": 60,
       "chatting": 1,
-      "exploring": 40
+      "exploring": 40,
+      "combat": 0
     }
   },
   "calendar": {
@@ -153,6 +154,16 @@
       "baseGoldByTier": { "hamlet": 80, "village": 150, "town": 300, "city": 600, "capital": 1000 },
       "maxStackQty": 5
     }
+  },
+  "combat": {
+    "hitBase": 0.65,
+    "hitPerSkillPoint": 0.05,
+    "hitFloor": 0.15,
+    "hitCeiling": 0.95,
+    "nonlethalDamageFactor": 0.5,
+    "fleeBaseChance": 0.5,
+    "fleePerAgilityPoint": 0.03,
+    "unarmed": { "damageBase": 1, "damageSpread": 2 }
   },
   "raceRegistry": {
     "races": {
