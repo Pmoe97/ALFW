@@ -70,6 +70,8 @@ import {
   settlementSpacingOf,
   maxSettlementSpacing,
   settlementSearchCellRadius,
+  findSettlementAdjacentOrigin,
+  findPassableOrigin,
 } from './engines/worldMapEngine.js';
 import { createFactionEngine, deriveFactionControl } from './engines/factionEngine.js';
 import {
@@ -2361,6 +2363,68 @@ assert.deepEqual(sectionNLinesA, sectionNLinesB, 'Section N output must be byte-
 console.log(`N-final PASSED: Section N produced identical output across two full runs (${sectionNLinesA.length} lines)`);
 
 console.log('\nSection N PASSED: rosters are deterministic under a fixed registry state and committed permanently as NODE_POPULATED birth snapshots; registry edits are logged settings facts that change only future generation (the designed exception to position-determinism); race extension fields merge additively onto the untouched base appearance; axes are race priors plus bounded seeded variance; population counts reuse the classification layer');
+
+// =============================================================================
+// Section O: isekai landing — settlement-adjacent origin tier-cap relaxation.
+//
+// findSettlementAdjacentOrigin's tierCap means "no bigger than this, ideally,"
+// not "this exact tier or the search gives up." When nothing at the requested
+// cap exists within LANDING_SEARCH_RINGS, the search must retry at each larger
+// tier in turn before falling back to a settlement-less origin — the fallback
+// to findPassableOrigin/settlement:null is reserved for a genuinely
+// settlement-free region, not merely "none of the exact tier requested."
+// =============================================================================
+console.log('\n=== Section O: isekai landing — settlement-adjacent origin ===');
+
+function runSectionO(record) {
+  // --- O1: relaxes from hamlet to village when only villages exist ----------
+  {
+    const cfg = classConfigWith({
+      tierThresholds: { hamlet: 0, village: 0, town: 1.1, city: 1.1, capital: 1.1 },
+    });
+    const result = findSettlementAdjacentOrigin(cfg, 'hamlet');
+    assert.ok(result.settlement, 'a village-only region must still yield a settlement when hamlet is requested');
+    assert.equal(result.settlement.tier, 'village', 'the relaxed search must accept the smallest tier actually present (village)');
+    record(`O1 PASSED: hamlet request relaxed to a village settlement (${result.settlement.id}) instead of giving up`);
+  }
+
+  // --- O2: relaxes through multiple tiers (hamlet -> village -> town) -------
+  {
+    const cfg = classConfigWith({
+      tierThresholds: { hamlet: 0, village: 1.1, town: 0, city: 1.1, capital: 1.1 },
+    });
+    const result = findSettlementAdjacentOrigin(cfg, 'hamlet');
+    assert.ok(result.settlement, 'a town-only region must still yield a settlement when hamlet is requested');
+    assert.equal(result.settlement.tier, 'town', 'the search must keep relaxing past village until it reaches the tier actually present (town)');
+    record(`O2 PASSED: hamlet request relaxed past village to a town settlement (${result.settlement.id})`);
+  }
+
+  // --- O3: genuinely settlement-free region still falls back cleanly --------
+  {
+    const cfg = classConfigWith({ suitabilityThreshold: 1.1 });
+    const result = findSettlementAdjacentOrigin(cfg, 'hamlet');
+    const expected = findPassableOrigin(cfg);
+    assert.equal(result.settlement, null, 'a settlement-free region must not be masked by relaxation — settlement must stay null');
+    assert.equal(result.x, expected.x, 'the settlement-free fallback must match findPassableOrigin exactly');
+    assert.equal(result.y, expected.y, 'the settlement-free fallback must match findPassableOrigin exactly');
+    record('O3 PASSED: a genuinely settlement-free region still falls back to findPassableOrigin with settlement: null');
+  }
+}
+
+// O1-O3, printed once.
+const sectionOLinesA = [];
+runSectionO((m) => {
+  sectionOLinesA.push(m);
+  console.log(m);
+});
+
+// --- O-final: determinism across full runs ------------------------------------
+const sectionOLinesB = [];
+runSectionO((m) => sectionOLinesB.push(m));
+assert.deepEqual(sectionOLinesA, sectionOLinesB, 'Section O output must be byte-identical across two full runs');
+console.log(`O-final PASSED: Section O produced identical output across two full runs (${sectionOLinesA.length} lines)`);
+
+console.log('\nSection O PASSED: findSettlementAdjacentOrigin relaxes its tier cap upward through SETTLEMENT_TIERS before giving up, and only abandons the settlement guarantee when the region is genuinely settlement-free');
 
 // =============================================================================
 // Section V: voice directives — permanent, axis-derived, coherent by
