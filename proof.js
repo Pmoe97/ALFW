@@ -41,6 +41,9 @@ import { fallbackTravelNarration } from './ai/fallbackTravelNarration.js';
 import { getSchema } from './engines/activeSchema.js';
 import { mergeSchemas } from './engines/schemaMerge.js';
 import { validateModPatch } from './engines/modContract.js';
+import { compileSchema } from './engines/schemaCompiler.js';
+import { ACTIVE_MODS } from './engines/activeMods.js';
+import rawVanilla from './base_vanilla.json' with { type: 'json' };
 import {
   createWorldClockEngine,
   deriveCalendarDate,
@@ -5341,6 +5344,99 @@ console.log('\n=== Section MC: modContract (prototype-pollution keys, size/depth
 }
 
 console.log('\nSection MC PASSED: validateModPatch hard-blocks prototype-pollution keys (including inside array elements), oversized/over-deep/over-wide patches, non-JSON-safe values (functions, Symbols, explicit undefined), malformed near-$remove sentinels (including a well-formed one stranded at the patch root with no key to delete), and any patch value that would silently clobber an object-shaped base config — accumulating every violation in one pass rather than short-circuiting on the first, and proven not to mutate or corrupt the real frozen getSchema() output');
+
+// --- Section SC: schemaCompiler — folds an ordered mod-patch stack onto a
+// base schema, validating each patch against the CUMULATIVE compiled state
+// so far (not just original base), and skipping (not crashing on) any patch
+// that fails validation. -------------------------------------------------
+console.log('\n=== Section SC: schemaCompiler (ordered mod-patch stacking) ===');
+
+{
+  // SC1: compileSchema(base, []) is a true no-op.
+  const sc1Base = structuredClone(getSchema());
+  const sc1Result = compileSchema(sc1Base, []);
+  assert.deepEqual(sc1Result.schema, sc1Base, 'empty mod list: compiled schema deep-equals base');
+  assert.deepEqual(sc1Result.applied, [], 'empty mod list: nothing applied');
+  assert.deepEqual(sc1Result.skipped, [], 'empty mod list: nothing skipped');
+  console.log('SC1 PASSED: compileSchema(base, []) is a true no-op');
+}
+
+{
+  // SC2: a single valid mod patch applies cleanly.
+  const sc2Base = structuredClone(getSchema());
+  const sc2Result = compileSchema(sc2Base, [
+    { name: 'lower-min-damage', patch: { combat: { minDamage: 0 } } },
+  ]);
+  assert.deepEqual(sc2Result.applied, ['lower-min-damage'], 'single valid mod: applied lists its name');
+  assert.deepEqual(sc2Result.skipped, [], 'single valid mod: nothing skipped');
+  assert.equal(sc2Result.schema.combat.minDamage, 0, 'single valid mod: patch value reflected in compiled schema');
+  assert.equal(sc2Result.schema.combat.maxEnemiesPerEncounter, sc2Base.combat.maxEnemiesPerEncounter, 'single valid mod: untouched sibling keys survive');
+  console.log('SC2 PASSED: a single valid mod patch applies cleanly');
+}
+
+{
+  // SC3: validation runs against CUMULATIVE state — a second mod may
+  // legitimately build on a brand-new key the first mod introduced, which
+  // `base` never had.
+  const sc3Base = structuredClone(getSchema());
+  const sc3Result = compileSchema(sc3Base, [
+    { name: 'add-section', patch: { modSpecificSection: { knobA: 1 } } },
+    { name: 'extend-section', patch: { modSpecificSection: { knobB: 2 } } },
+  ]);
+  assert.deepEqual(sc3Result.applied, ['add-section', 'extend-section'], 'both mods applied in order');
+  assert.deepEqual(sc3Result.skipped, [], 'nothing skipped');
+  assert.deepEqual(sc3Result.schema.modSpecificSection, { knobA: 1, knobB: 2 }, "second mod merged onto the first mod's new section, proving validation saw cumulative state, not just base");
+  console.log('SC3 PASSED: validation runs against cumulative compiled state, not just the original base');
+}
+
+{
+  // SC4/SC5: an invalid mod (a genuine own __proto__ key, built the same way
+  // Section MC does — JSON.parse, not object-literal syntax, which would
+  // trigger the exotic prototype-setting accessor instead of creating an
+  // own property) is skipped with its real validation errors, and does NOT
+  // block a later valid mod in the same list.
+  const sc4Base = structuredClone(getSchema());
+  const sc4EvilPatch = JSON.parse('{"__proto__":{"polluted":true}}');
+  const sc4Result = compileSchema(sc4Base, [
+    { name: 'evil-mod', patch: sc4EvilPatch },
+    { name: 'good-mod', patch: { combat: { minDamage: 0 } } },
+  ]);
+  assert.deepEqual(sc4Result.applied, ['good-mod'], 'the invalid mod is skipped; the subsequent valid mod still applies');
+  assert.equal(sc4Result.skipped.length, 1, 'exactly one mod skipped');
+  assert.equal(sc4Result.skipped[0].name, 'evil-mod', 'skipped entry names the rejected mod');
+  assert.ok(sc4Result.skipped[0].errors.length > 0, 'skipped entry carries real validation errors, not just a bare name');
+  assert.ok(sc4Result.skipped[0].errors.some((e) => e.message.includes('__proto__')), 'skipped errors mention the actual __proto__ violation');
+  assert.equal(sc4Result.schema.combat.minDamage, 0, 'good-mod merged in despite evil-mod being rejected first');
+  assert.equal(Object.getPrototypeOf(sc4Result.schema), Object.prototype, "evil-mod never actually polluted the compiled schema's prototype");
+  console.log('SC4/SC5 PASSED: an invalid mod is skipped with its real validation errors and does not block a later valid mod');
+}
+
+{
+  // SC6: compileSchema never mutates base or any patch in modPatches.
+  const sc6Base = structuredClone(getSchema());
+  const sc6BaseSnapshot = structuredClone(sc6Base);
+  const sc6Patches = [
+    { name: 'a', patch: { combat: { minDamage: 0 } } },
+    { name: 'b', patch: { combat: { $remove: 'yes' } } }, // malformed sentinel, will be skipped
+  ];
+  const sc6PatchesSnapshot = structuredClone(sc6Patches);
+  compileSchema(sc6Base, sc6Patches);
+  assert.deepEqual(sc6Base, sc6BaseSnapshot, 'base is byte-for-byte unchanged after compileSchema');
+  assert.deepEqual(sc6Patches, sc6PatchesSnapshot, 'modPatches array/patches are byte-for-byte unchanged after compileSchema');
+  console.log('SC6 PASSED: compileSchema never mutates base or any patch in modPatches');
+}
+
+{
+  // SC7: with the real (empty by default) ACTIVE_MODS, getSchema()'s wiring
+  // through compileSchema is truly a no-op — deep-equal to base_vanilla.json
+  // raw content, and still frozen.
+  assert.deepEqual(ACTIVE_MODS, [], 'sanity: ACTIVE_MODS ships empty by default');
+  assert.deepEqual(getSchema(), rawVanilla, 'getSchema() output deep-equals base_vanilla.json raw content with the default empty ACTIVE_MODS');
+  assert.ok(Object.isFrozen(getSchema()), 'getSchema() output is still deep-frozen');
+  console.log('SC7 PASSED: with default empty ACTIVE_MODS, activeSchema.js wiring through compileSchema is a true no-op, deep-equal to raw base_vanilla.json and still frozen');
+}
+
+console.log("\nSection SC PASSED: compileSchema folds an ordered mod-patch stack onto a base schema, validating each patch against cumulative compiled state (not just original base) so later mods can build on earlier ones' new keys; an invalid mod is skipped with its real validation errors rather than crashing the stack, letting subsequent valid mods still apply; the function never mutates its inputs; and activeSchema.js's wiring is a true no-op today given the empty default ACTIVE_MODS");
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
