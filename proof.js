@@ -121,6 +121,7 @@ import {
   createQuestEngine,
   deriveQuestStatuses,
   deriveObjectiveProgress,
+  tierMeetsFor,
 } from './engines/questEngine.js';
 import { QUEST_DEFS, getQuestDef, questIds, OBJECTIVE_TYPES } from './engines/questData.js';
 import {
@@ -3898,6 +3899,36 @@ const quRunB = runSectionQU((m) => sectionQuLinesB.push(m));
 assert.deepEqual(sectionQuLinesA, sectionQuLinesB, 'Section QU output must be byte-identical across two full runs');
 assert.deepEqual(quRunB.log, quRunA.log, 'the identical lived quest run must produce the identical event log');
 console.log(`QU-final PASSED: Section QU produced identical output (${sectionQuLinesA.length} lines) and an identical ${quRunA.log.length}-event log across two full runs`);
+
+{
+  // QU-tier-order: tierMeetsFor must rank tiers by each label's OWN max
+  // threshold value, never by its position in the array. tierThresholds is
+  // schema-moddable (mergeSchemas wholesale-replaces arrays — Section SM's
+  // SM5), so a mod patch can reorder it; the fix under test replaced an
+  // indexOf-into-array-position ordinal comparison with one keyed off each
+  // entry's own max value, which is invariant to declaration order.
+  const quTiersAscending = [
+    { max: -10, label: 'hostile' },
+    { max: 10, label: 'stranger' },
+    { max: 30, label: 'acquaintance' },
+    { max: 60, label: 'friend' },
+    { max: Infinity, label: 'trusted' },
+  ];
+  const quTiersShuffled = [
+    { max: 60, label: 'friend' },
+    { max: Infinity, label: 'trusted' },
+    { max: -10, label: 'hostile' },
+    { max: 30, label: 'acquaintance' },
+    { max: 10, label: 'stranger' },
+  ];
+  assert.equal(tierMeetsFor(quTiersAscending, 'friend', 'acquaintance'), true, 'friend meets a required acquaintance tier under the declared order');
+  assert.equal(tierMeetsFor(quTiersShuffled, 'friend', 'acquaintance'), true, 'reordering the thresholds array does not change a satisfied comparison');
+  assert.equal(tierMeetsFor(quTiersAscending, 'stranger', 'friend'), false, 'stranger does not meet a required friend tier under the declared order');
+  assert.equal(tierMeetsFor(quTiersShuffled, 'stranger', 'friend'), false, 'reordering the thresholds array does not change a failing comparison either');
+  assert.equal(tierMeetsFor(quTiersShuffled, 'trusted', 'hostile'), true, 'the highest tier meets the lowest requirement regardless of array order');
+  assert.equal(tierMeetsFor(quTiersShuffled, 'unknownTier', 'friend'), false, 'an unrecognized label never satisfies the requirement (mirrors the old indexOf === -1 short-circuit)');
+  console.log("QU-tier-order PASSED: tierMeetsFor derives rank from each label's own max threshold value, not array position — robust to a mod wholesale-replacing tierThresholds in a different order");
+}
 
 console.log('\nSection QU PASSED: quest lifecycle is log-backed and derived (available → active → completed | failed), objectives are pure log-replay matches over real underlying events, acceptance is the first real caller of injectPoi/grantRevealAuthority, and completion pays only through the existing economy/relationship/faction systems with the status fact committed last');
 
