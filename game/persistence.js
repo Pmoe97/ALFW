@@ -1,115 +1,280 @@
 // game/persistence.js — the ONLY persistent store in the game: named world
 // presets (config templates, distinct from saves) and named save slots. Both
-// live in localStorage; the existing serializeWorld/parseSave (game/saveLoad.js)
-// already reduce a whole world to { config, eventLog }, so a save slot is just
-// that string plus a little display metadata.
+// live in IndexedDB; the existing serializeWorld/parseSave (game/saveLoad.js)
+// already reduce a whole world to { config, eventLog }, so a save slot is
+// just that string plus a little display metadata.
 //
-// Perchance runs under a strict CSP and localStorage can be unavailable or
-// throw; pickBackend() probes once and falls back to an in-memory Map so the
-// flow never crashes off a real page (saves simply don't survive a reload then).
+// Backed by IndexedDB instead of localStorage so a save's event log isn't
+// bounded by localStorage's size ceiling (the actual prerequisite for a real
+// ModManager — mod lists, save data, and export/import all need storage
+// beyond that ceiling). Perchance runs under a strict CSP and IndexedDB can
+// be unavailable, blocked, or throw on open; pickBackend()+the probe in
+// createPersistence() fall back to an in-memory Map so the flow never
+// crashes off a real page (saves simply don't survive a reload then).
 //
-// Presets are a template LIBRARY that outlives any single playthrough; saves are
-// individual runs. They are stored under separate keys and never commingled.
+// Every public function here is now ASYNC (returns a Promise) — callers must
+// await. All exported names and return shapes are unchanged from the
+// synchronous localStorage version; only the storage layer changed.
+//
+// Presets are a template LIBRARY that outlives any single playthrough; saves
+// are individual runs. They are stored under separate key prefixes and never
+// commingled.
+//
+// Storage layout: ONE RECORD PER NAME, not one big JSON blob holding every
+// preset/save. The old localStorage design read-modify-wrote a single
+// monolithic blob on every mutation, which is exactly the scaling problem
+// this migration exists to fix (a write to one save had to deserialize and
+// re-serialize every OTHER save's full event log too). listSaves() also
+// only reads small "save-meta" records (name/savedAt/meta), never the heavy
+// event-log data blob — loadSave(name) is the only thing that touches a
+// save's full data.
 
 import { serializeWorld, parseSave } from './saveLoad.js';
 
-const PRESETS_KEY = 'alfw:presets:v1';
-const SAVES_KEY = 'alfw:saves:v1';
+const DB_NAME = 'alfw-persistence';
+const DB_VERSION = 1;
+const STORE = 'kv';
 
-function memoryBackend() {
+const PRESET_PREFIX = 'preset:';
+const SAVE_META_PREFIX = 'save-meta:';
+const SAVE_DATA_PREFIX = 'save-data:';
+const PROBE_KEY = '__alfw_probe__';
+
+// memoryBackend — an in-memory Map behind the same {getItem, setItem,
+// removeItem, listKeys} shape as indexedDbBackend, so createPersistence never
+// has to know which one it's talking to. Exported so proof.js (no real
+// IndexedDB in Node) can construct isolated, deterministic instances via
+// createPersistence(memoryBackend()).
+export function memoryBackend() {
   const m = new Map();
   return {
-    getItem: (k) => (m.has(k) ? m.get(k) : null),
-    setItem: (k, v) => m.set(k, v),
-    removeItem: (k) => m.delete(k),
+    async getItem(key) {
+      return m.has(key) ? m.get(key) : null;
+    },
+    async setItem(key, value) {
+      m.set(key, value);
+    },
+    async removeItem(key) {
+      m.delete(key);
+    },
+    async listKeys(prefix) {
+      return [...m.keys()].filter((k) => k.startsWith(prefix));
+    },
     persistent: false,
   };
 }
 
-// pickBackend — real localStorage when it's present AND writable (the probe
-// catches Safari private-mode / CSP throws), else an in-memory shim.
-function pickBackend() {
-  try {
-    const ls = globalThis.localStorage;
-    if (!ls) return memoryBackend();
-    const probe = '__alfw_probe__';
-    ls.setItem(probe, '1');
-    ls.removeItem(probe);
-    ls.persistent = true;
-    return ls;
-  } catch {
-    return memoryBackend();
-  }
+function reqToPromise(req) {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
 }
 
-export function createPersistence(backend = pickBackend()) {
-  function readMap(key) {
-    const raw = backend.getItem(key);
-    if (!raw) return {};
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {}; // corrupt blob — treat as empty rather than crash the menu
+function txDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+  });
+}
+
+// indexedDbBackend — the real browser backend: one database, one object
+// store, keyed by our own prefixed string keys (so listKeys can filter by
+// prefix without a secondary index). The db-open call is made lazily (on
+// first use, not at backend-construction time) and cached, so constructing
+// this backend is cheap and side-effect-free.
+export function indexedDbBackend() {
+  let dbPromise = null;
+  function getDb() {
+    if (!dbPromise) {
+      dbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
     }
+    return dbPromise;
   }
-  function writeMap(key, map) {
-    backend.setItem(key, JSON.stringify(map));
+  async function getItem(key) {
+    const db = await getDb();
+    const tx = db.transaction(STORE, 'readonly');
+    const value = await reqToPromise(tx.objectStore(STORE).get(key));
+    return value === undefined ? null : value;
+  }
+  async function setItem(key, value) {
+    const db = await getDb();
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(value, key);
+    await txDone(tx);
+  }
+  async function removeItem(key) {
+    const db = await getDb();
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).delete(key);
+    await txDone(tx);
+  }
+  async function listKeys(prefix) {
+    const db = await getDb();
+    const tx = db.transaction(STORE, 'readonly');
+    const allKeys = await reqToPromise(tx.objectStore(STORE).getAllKeys());
+    return allKeys.filter((k) => typeof k === 'string' && k.startsWith(prefix));
+  }
+  return { getItem, setItem, removeItem, listKeys, persistent: true };
+}
+
+// pickBackend — real IndexedDB when the global exists, else the in-memory
+// shim. This is only a presence check; createPersistence's own probe (below)
+// catches a backend that exists but throws/rejects on actual use (Safari
+// private-mode-style failures, matching this file's long-standing CSP
+// concern).
+function pickBackend() {
+  if (typeof indexedDB === 'undefined') return memoryBackend();
+  return indexedDbBackend();
+}
+
+export function createPersistence(backendOrFactory = pickBackend) {
+  let backend = null;
+  let resolving = null;
+  // Lazy + memoized: resolves once, on first actual use, and probes the
+  // candidate with a real write+delete before trusting it (mirrors the old
+  // localStorage write-probe) — if that throws or rejects, fall back to
+  // memoryBackend and remember that choice instead of retrying every call.
+  function getBackend() {
+    if (backend) return Promise.resolve(backend);
+    if (!resolving) {
+      resolving = (async () => {
+        const candidate = typeof backendOrFactory === 'function' ? backendOrFactory() : backendOrFactory;
+        try {
+          await candidate.setItem(PROBE_KEY, '1');
+          await candidate.removeItem(PROBE_KEY);
+          backend = candidate;
+        } catch {
+          backend = memoryBackend();
+        }
+        return backend;
+      })();
+    }
+    return resolving;
+  }
+
+  // Serialize every mutation on this instance. Going async introduces a race
+  // that never existed under synchronous localStorage: two overlapping
+  // read-modify-write calls to the same record could interleave (both read
+  // the old value, second write clobbers the first). A single promise chain
+  // per persistence instance means mutations always run one at a time, in
+  // call order, regardless of how they overlap from the caller's side.
+  let queue = Promise.resolve();
+  function enqueue(fn) {
+    const result = queue.then(fn, fn);
+    queue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  async function readJson(key) {
+    const b = await getBackend();
+    const raw = await b.getItem(key);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null; // corrupt record — treat as absent rather than crash the menu
+    }
   }
 
   // --- Presets: named config templates --------------------------------------
-  function listPresets() {
-    const map = readMap(PRESETS_KEY);
-    return Object.keys(map).sort().map((name) => ({ name }));
+  async function listPresets() {
+    const b = await getBackend();
+    const keys = await b.listKeys(PRESET_PREFIX);
+    return keys
+      .map((k) => ({ name: k.slice(PRESET_PREFIX.length) }))
+      .sort((a, c) => a.name.localeCompare(c.name));
   }
-  function getPreset(name) {
-    return readMap(PRESETS_KEY)[name] ?? null;
+  async function getPreset(name) {
+    return readJson(PRESET_PREFIX + name);
   }
   function savePreset(name, config) {
-    const map = readMap(PRESETS_KEY);
-    map[name] = config;
-    writeMap(PRESETS_KEY, map);
+    return enqueue(async () => {
+      const b = await getBackend();
+      await b.setItem(PRESET_PREFIX + name, JSON.stringify(config));
+    });
   }
   function deletePreset(name) {
-    const map = readMap(PRESETS_KEY);
-    delete map[name];
-    writeMap(PRESETS_KEY, map);
+    return enqueue(async () => {
+      const b = await getBackend();
+      await b.removeItem(PRESET_PREFIX + name);
+    });
   }
 
   // --- Saves: named runs -----------------------------------------------------
-  // A save record: { name, savedAt, meta, data } where data is the
-  // serializeWorld() string. meta is display-only (worldName / player / date).
-  function listSaves() {
-    const map = readMap(SAVES_KEY);
-    return Object.values(map)
+  // A save is two records: save-meta (name/savedAt/meta, small — what
+  // listSaves reads) and save-data (the serializeWorld() string, only read
+  // by loadSave). meta is display-only (worldName / player / date).
+  async function listSaves() {
+    const b = await getBackend();
+    const keys = await b.listKeys(SAVE_META_PREFIX);
+    const metas = await Promise.all(keys.map((k) => readJson(k)));
+    return metas
+      .filter(Boolean)
       .map(({ name, savedAt, meta }) => ({ name, savedAt, meta: meta ?? {} }))
-      .sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
+      .sort((a, c) => String(c.savedAt).localeCompare(String(a.savedAt)));
   }
   function writeSave(name, world, meta = {}) {
-    const map = readMap(SAVES_KEY);
-    map[name] = { name, savedAt: new Date().toISOString(), meta, data: serializeWorld(world) };
-    writeMap(SAVES_KEY, map);
+    return enqueue(async () => {
+      const b = await getBackend();
+      const savedAt = new Date().toISOString();
+      await b.setItem(SAVE_META_PREFIX + name, JSON.stringify({ name, savedAt, meta }));
+      await b.setItem(SAVE_DATA_PREFIX + name, serializeWorld(world));
+    });
   }
   function deleteSave(name) {
-    const map = readMap(SAVES_KEY);
-    delete map[name];
-    writeMap(SAVES_KEY, map);
+    return enqueue(async () => {
+      const b = await getBackend();
+      await b.removeItem(SAVE_META_PREFIX + name);
+      await b.removeItem(SAVE_DATA_PREFIX + name);
+    });
   }
   // loadSave — the { config, eventLog } a save reconstructs to, ready for
   // buildLiveGame({ save }). Null when the slot is missing or unparseable.
-  function loadSave(name) {
-    const record = readMap(SAVES_KEY)[name];
-    if (!record?.data) return null;
+  async function loadSave(name) {
+    const b = await getBackend();
+    const raw = await b.getItem(SAVE_DATA_PREFIX + name);
+    if (!raw) return null;
     try {
-      return parseSave(record.data);
+      return parseSave(raw);
     } catch {
       return null;
     }
   }
 
   return {
-    isPersistent: () => backend.persistent === true,
+    isPersistent: async () => (await getBackend()).persistent === true,
     listPresets, getPreset, savePreset, deletePreset,
     listSaves, writeSave, deleteSave, loadSave,
   };
 }
+
+// --- Manual browser smoke-test checklist ------------------------------------
+// proof.js runs under plain Node, which has no real IndexedDB, so it only
+// exercises memoryBackend(). Verify the real indexedDbBackend() path by hand
+// in an actual browser after `npm run build`:
+//
+//  1. Open the built app; start a run; Save via the debug menu ("Session"
+//     section). Open devtools → Application → IndexedDB → alfw-persistence →
+//     kv, and confirm a `save-meta:<name>` and a `save-data:<name>` record
+//     both appear.
+//  2. Reload the page; open "Continue" from the main menu; confirm the save
+//     is listed (proves listSaves reads save-meta without needing save-data)
+//     and Load reconstructs the same run.
+//  3. Save two differently-named runs, then Delete one from the Continue
+//     screen; confirm only that one's save-meta/save-data pair disappears
+//     from IndexedDB and the other survives.
+//  4. In a private/incognito window (or with IndexedDB disabled via devtools
+//     if the browser allows it), confirm the app falls back to the in-memory
+//     backend instead of crashing: saves work for the session but the
+//     Continue screen shows the "Storage unavailable" note, and nothing
+//     appears in Application → IndexedDB.

@@ -61,9 +61,10 @@ function sessionSection(ui) {
     return s;
   }
   const row = div('display:flex; flex-wrap:wrap; align-items:center; gap:6px;');
-  row.appendChild(button(ui.state.savedNote || 'Save game', CHIP, () => {
-    const name = session.save();
-    ui.setState({ savedNote: `Saved: ${name}` });
+  row.appendChild(button(ui.state.saving ? 'Saving…' : (ui.state.savedNote || 'Save game'), CHIP, async () => {
+    ui.setState({ saving: true });
+    const name = await session.save();
+    ui.setState({ saving: false, savedNote: `Saved: ${name}` });
   }));
   row.appendChild(button('Quit to menu', CHIP, () => session.quitToMenu()));
   s.appendChild(row);

@@ -33,6 +33,7 @@ import { createQueueManager } from './ai/queueManager.js';
 import { getDialogue } from './ai/getDialogue.js';
 import { buildSampleWorld } from './game/sampleWorld.js';
 import { serializeWorld, parseSave, diffConfigKeys } from './game/saveLoad.js';
+import { createPersistence, memoryBackend } from './game/persistence.js';
 import { createRelationshipEffectEngine } from './engines/relationshipEffectEngine.js';
 import { createMemoryEngine, deriveEntityMemories } from './engines/memoryEngine.js';
 import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from './actions/playerActions.js';
@@ -4870,6 +4871,99 @@ assert.equal(sl18L.travel.getPlayerNodeId(), sl18Dest, 'the loaded world resumes
 console.log('SL18 PASSED: an in-progress combat round-trips (open fight, hp, statuses, round, turn order), loaded caches equal their rebuilds, load re-grants no loot, and resuming the identical fight drives a byte-identical finish that then arrives the frozen leg');
 
 console.log('\nSection SL PASSED: the entire world state round-trips through (config + event log) alone — serialize, reconstruct fresh engines, and every derived read (inventory, gold, shop stock, quest state, and an in-progress combat included) matches the original exactly');
+
+// --- Section PS: game/persistence.js — the async IndexedDB-backed storage
+// adapter (Section SL above only proves the pure serialize/parse layer;
+// nothing previously exercised the storage-adapter layer itself). Real
+// IndexedDB doesn't exist under plain Node, so every check here runs against
+// memoryBackend() — the same backend the browser falls back to when
+// IndexedDB is unavailable/blocked. See the manual browser smoke-test
+// checklist in game/persistence.js for verifying the real indexedDbBackend()
+// path, which proof.js cannot reach.
+console.log('\n=== Section PS: persistence.js (async storage adapter over memoryBackend) ===');
+
+{
+  // PS1: save-then-load round-trips exactly, through the real async API (not
+  // just serializeWorld/parseSave directly, as SL does) — proving the
+  // storage-adapter layer itself (per-record write/read, JSON encode/decode)
+  // doesn't lose or corrupt data on the way through.
+  const ps1Sample = buildSampleWorld();
+  const ps1 = createPersistence(memoryBackend());
+  assert.deepEqual(await ps1.listSaves(), [], 'a fresh persistence instance starts with no saves');
+  await ps1.writeSave('ps1-save', ps1Sample.world, { worldName: 'PS1 World', player: 'Tester' });
+  const ps1Loaded = await ps1.loadSave('ps1-save');
+  const ps1Expected = parseSave(serializeWorld(ps1Sample.world));
+  assert.deepEqual(ps1Loaded, ps1Expected, 'loadSave reconstructs the exact { config, eventLog } the world serialized to');
+  const ps1List = await ps1.listSaves();
+  assert.equal(ps1List.length, 1, 'listSaves reports exactly the one save written');
+  assert.equal(ps1List[0].name, 'ps1-save', 'listSaves reports the save under its written name');
+  assert.deepEqual(ps1List[0].meta, { worldName: 'PS1 World', player: 'Tester' }, 'listSaves surfaces the display meta without touching the (unread) event-log data record');
+  assert.equal(await ps1.loadSave('does-not-exist'), null, 'loadSave on a missing name returns null rather than throwing');
+  console.log('PS1 PASSED: writeSave/loadSave/listSaves round-trip a real world through the async storage-adapter layer exactly, and a missing save loads as null');
+}
+
+{
+  // PS2: a reasonably large event log does not silently truncate or drop
+  // data on the way through the async backend. Pads a real world's log with
+  // 2000 CLOCK_JUMP entries (a cheap, deterministic, side-effect-light event)
+  // before round-tripping it.
+  const ps2Sample = buildSampleWorld();
+  const ps2StartLen = ps2Sample.world.getEventLog().length;
+  for (let i = 0; i < 2000; i++) ps2Sample.world.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 60 });
+  const ps2LogLen = ps2Sample.world.getEventLog().length;
+  assert.equal(ps2LogLen, ps2StartLen + 2000, 'sanity: the padded fixture world really does carry 2000 extra log entries');
+  const ps2 = createPersistence(memoryBackend());
+  await ps2.writeSave('ps2-large', ps2Sample.world, {});
+  const ps2Loaded = await ps2.loadSave('ps2-large');
+  assert.equal(ps2Loaded.eventLog.length, ps2LogLen, 'a large event log round-trips with every entry intact — none silently dropped or truncated');
+  assert.deepEqual(ps2Loaded.eventLog, ps2Sample.world.getEventLog(), 'the round-tripped large log is byte-for-byte identical to the original, entry for entry');
+  console.log(`PS2 PASSED: a ${ps2LogLen}-entry event log round-trips through the async storage-adapter layer with zero entries dropped or truncated`);
+}
+
+{
+  // PS3: concurrent-write safety. Synchronous localStorage read-modify-write
+  // could never interleave; async read-modify-write against the same
+  // instance can, unless writes are serialized. Fire two writeSave calls
+  // back-to-back WITHOUT awaiting between them, then await both — the
+  // per-instance write queue in createPersistence must still land both, in
+  // some order, rather than one silently clobbering the other.
+  const ps3SampleA = buildSampleWorld();
+  const ps3SampleB = buildSampleWorld();
+  const ps3 = createPersistence(memoryBackend());
+  const ps3WriteA = ps3.writeSave('ps3-a', ps3SampleA.world, { player: 'A' });
+  const ps3WriteB = ps3.writeSave('ps3-b', ps3SampleB.world, { player: 'B' });
+  await Promise.all([ps3WriteA, ps3WriteB]);
+  const ps3List = await ps3.listSaves();
+  assert.equal(ps3List.length, 2, 'two concurrent writeSave calls to DIFFERENT names both land — neither is lost to a race');
+  assert.deepEqual(new Set(ps3List.map((s) => s.name)), new Set(['ps3-a', 'ps3-b']), 'both concurrently-written save names are present');
+  const ps3LoadedA = await ps3.loadSave('ps3-a');
+  assert.deepEqual(ps3LoadedA, parseSave(serializeWorld(ps3SampleA.world)), 'the first concurrent write is fully intact, not partially overwritten by the second');
+
+  // Same-name race: two overlapping writes to the SAME slot must still leave
+  // it holding one complete, self-consistent record (never a spliced mix of
+  // the two writes' meta and data), because the queue serializes them.
+  const ps3SameA = buildSampleWorld();
+  const ps3SameB = buildSampleWorld();
+  // buildSampleWorld() with no args is fully deterministic (SL1 proves two
+  // fresh instances serialize byte-identical) — dispatch one extra event on B
+  // so its serialized data actually diverges from A's, making the "which
+  // write won" check below meaningful rather than vacuously true either way.
+  ps3SameB.world.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 3600 });
+  const ps3RaceA = ps3.writeSave('ps3-same-slot', ps3SameA.world, { player: 'first' });
+  const ps3RaceB = ps3.writeSave('ps3-same-slot', ps3SameB.world, { player: 'second' });
+  await Promise.all([ps3RaceA, ps3RaceB]);
+  const ps3RaceLoaded = await ps3.loadSave('ps3-same-slot');
+  const ps3RaceList = await ps3.listSaves();
+  const ps3RaceMeta = ps3RaceList.find((s) => s.name === 'ps3-same-slot').meta;
+  const ps3RaceDataJson = JSON.stringify(ps3RaceLoaded);
+  const ps3DataMatchesA = ps3RaceDataJson === JSON.stringify(parseSave(serializeWorld(ps3SameA.world)));
+  const ps3DataMatchesB = ps3RaceDataJson === JSON.stringify(parseSave(serializeWorld(ps3SameB.world)));
+  assert.ok(ps3DataMatchesA || ps3DataMatchesB, 'the same-slot race resolves the DATA record to exactly one of the two writes, never a corrupted mix');
+  assert.equal(ps3RaceMeta.player, ps3DataMatchesA ? 'first' : 'second', 'the META record for the same slot matches whichever write\'s DATA record won — the two records from one call are never split across the outcome');
+  console.log('PS3 PASSED: the per-instance write queue serializes overlapping writeSave calls — concurrent writes to different slots both land intact, and a same-slot race resolves to one complete write rather than a spliced mix');
+}
+
+console.log('\nSection PS PASSED: game/persistence.js\'s async storage-adapter layer (over memoryBackend, the same fallback the browser uses when IndexedDB is unavailable) round-trips a real world exactly, does not truncate a large event log, and serializes concurrent writes so an async race can never silently drop or splice a save — see the file\'s own header comment for the manual browser checklist covering the real indexedDbBackend() path');
 
 // --- Section DP: dispatch entry-point guards (undefined-payload guard +
 // transactional dispatchBatch) -----------------------------------------------
