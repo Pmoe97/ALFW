@@ -38,6 +38,8 @@ import { createMemoryEngine, deriveEntityMemories } from './engines/memoryEngine
 import { helpNpc, robNpc, ignoreNpc, startDialogue, endDialogue } from './actions/playerActions.js';
 import { createTravelEngine, deriveTravelIncident } from './engines/travelEngine.js';
 import { fallbackTravelNarration } from './ai/fallbackTravelNarration.js';
+import { getSchema } from './engines/activeSchema.js';
+import { mergeSchemas } from './engines/schemaMerge.js';
 import {
   createWorldClockEngine,
   deriveCalendarDate,
@@ -5017,6 +5019,92 @@ const dpMinimalConfig = { worldName: 'dp', startDateTime: '2024-01-01T00:00:00Z'
 }
 
 console.log('\nSection DP PASSED: the dispatch entry point rejects any event whose payload carries an explicit undefined at any depth before it ever reaches the log, and dispatchBatch commits a composite action\'s full event list all-or-nothing — proven both generically and through the real completeQuest turn-in path');
+
+// --- Section SM: schemaMerge — pure three-verb patch merge (object recurse,
+// wholesale replace, $remove delete) -----------------------------------------
+console.log('\n=== Section SM: schemaMerge — pure three-verb patch merge (recurse / replace / $remove) ===');
+
+{
+  // SM1: simple top-level override, siblings at that level untouched.
+  const smBase1 = getSchema();
+  const smMerged1 = mergeSchemas(smBase1, { combat: { maxEnemiesPerEncounter: 9 } });
+  assert.equal(smMerged1.combat.maxEnemiesPerEncounter, 9, 'patched scalar leaf takes the new value');
+  assert.equal(smMerged1.combat.minDamage, smBase1.combat.minDamage, 'untouched sibling scalar under the same object is preserved');
+  assert.deepEqual(smMerged1.combat.fleeChanceClamp, smBase1.combat.fleeChanceClamp, 'untouched sibling object under the same object is preserved');
+  assert.equal(smMerged1.economy, smBase1.economy, 'an entirely untouched top-level subtree is shared by reference from base');
+  console.log('SM1 PASSED: a nested scalar override leaves every sibling key (scalar, object, and untouched top-level subtree) intact');
+}
+
+{
+  // SM2: nested object merge preserving siblings at every level.
+  const smBase2 = getSchema();
+  const smPatch2 = { relationships: { divergence: { complicated: { affectionMin: 999 } } } };
+  const smMerged2 = mergeSchemas(smBase2, smPatch2);
+  assert.equal(smMerged2.relationships.divergence.complicated.affectionMin, 999, 'deeply nested override lands at the right path');
+  assert.equal(smMerged2.relationships.divergence.complicated.trustMax, smBase2.relationships.divergence.complicated.trustMax, 'untouched sibling scalar inside the patched object is preserved');
+  assert.deepEqual(smMerged2.relationships.divergence.resentful, smBase2.relationships.divergence.resentful, 'untouched sibling object one level up is preserved');
+  assert.equal(smMerged2.relationships.actionDeltas, smBase2.relationships.actionDeltas, 'untouched sibling object at the relationships level is preserved (still shared by reference)');
+  assert.equal(smMerged2.relationships.tierThresholds, smBase2.relationships.tierThresholds, 'untouched array sibling at the relationships level is preserved (still shared by reference)');
+  console.log('SM2 PASSED: a three-levels-deep nested override preserves every sibling at every level on the way down');
+}
+
+{
+  // SM3: $remove deletes an existing key.
+  const smBase3 = getSchema();
+  const smMerged3 = mergeSchemas(smBase3, { economy: { $remove: true } });
+  assert.ok(!('economy' in smMerged3), '$remove deletes an existing top-level key');
+  assert.equal(smMerged3.combat, smBase3.combat, 'a sibling top-level subtree is untouched (still shared by reference) after a sibling is removed');
+  console.log('SM3 PASSED: $remove deletes an existing key from the result');
+}
+
+{
+  // SM4: $remove on a key that does not exist is a silent no-op.
+  const smBase4 = getSchema();
+  assert.ok(!('doesNotExist' in smBase4), 'sanity: fixture key absent from base');
+  const smMerged4 = mergeSchemas(smBase4, { doesNotExist: { $remove: true } });
+  assert.ok(!('doesNotExist' in smMerged4), '$remove on an absent key is a no-op, not an error');
+  assert.deepEqual(smMerged4, smBase4, 'nothing else changes when the only patch instruction removes a nonexistent key');
+  console.log('SM4 PASSED: $remove on a nonexistent key is a silent no-op (no throw, no stray key)');
+}
+
+{
+  // SM5: whole-array replacement — never merged/reconciled element-by-element.
+  const smBase5 = getSchema();
+  const smNewTiers = [{ max: null, label: 'only-tier' }];
+  const smMerged5 = mergeSchemas(smBase5, { relationships: { tierThresholds: smNewTiers } });
+  assert.deepEqual(smMerged5.relationships.tierThresholds, smNewTiers, 'patch array wholesale-replaces the base array');
+  assert.notEqual(smMerged5.relationships.tierThresholds.length, smBase5.relationships.tierThresholds.length, 'the replacement is not a merge of the two arrays (lengths differ)');
+  assert.deepEqual(smMerged5.relationships.divergence, smBase5.relationships.divergence, 'sibling of the replaced array is untouched');
+  console.log('SM5 PASSED: an array patch value replaces the base array wholesale, with no positional/id reconciliation');
+}
+
+{
+  // SM6: patch introduces a brand-new top-level key absent from base.
+  const smBase6 = getSchema();
+  assert.ok(!('modSpecificSection' in smBase6), 'sanity: fixture key absent from base');
+  const smMerged6 = mergeSchemas(smBase6, { modSpecificSection: { newKnob: 42 } });
+  assert.deepEqual(smMerged6.modSpecificSection, { newKnob: 42 }, 'a brand-new top-level key introduced by the patch is present in the result');
+  assert.equal(smMerged6.combat, smBase6.combat, 'existing top-level subtrees are untouched when a new key is introduced');
+  console.log('SM6 PASSED: a patch may introduce a brand-new key that base does not have');
+}
+
+{
+  // SM7: immutability against the real deep-frozen getSchema() output.
+  const smSnapshotBefore = JSON.parse(JSON.stringify(getSchema()));
+  const smBase7 = getSchema();
+  assert.ok(Object.isFrozen(smBase7), 'sanity: real getSchema() output is frozen');
+  mergeSchemas(smBase7, {
+    combat: { maxEnemiesPerEncounter: 1 },
+    relationships: { tierThresholds: [{ max: null, label: 'x' }], divergence: { $remove: true } },
+    brandNewTopLevelKey: { a: 1 },
+  });
+  const smSnapshotAfter = JSON.parse(JSON.stringify(getSchema()));
+  assert.deepEqual(smSnapshotAfter, smSnapshotBefore, 'getSchema() output is byte-for-byte identical before and after a merge that touched, removed, and added keys');
+  assert.equal(getSchema(), smBase7, 'getSchema() keeps returning the exact same frozen object identity — mergeSchemas never mutated or replaced it');
+  console.log('SM7 PASSED: mergeSchemas never mutates its base argument, proven against the real deep-frozen getSchema() output across a scalar override, an array replace, a $remove, and a new key all in one patch');
+}
+
+console.log('\nSection SM PASSED: mergeSchemas implements the three-verb patch grammar (object-recurse, wholesale-replace, $remove-delete) purely — siblings survive at every level, arrays replace whole, $remove is idempotent on an absent key, new keys may be introduced, and the real frozen base_vanilla schema is never mutated');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
