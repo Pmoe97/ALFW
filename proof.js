@@ -40,6 +40,7 @@ import { createTravelEngine, deriveTravelIncident } from './engines/travelEngine
 import { fallbackTravelNarration } from './ai/fallbackTravelNarration.js';
 import { getSchema } from './engines/activeSchema.js';
 import { mergeSchemas } from './engines/schemaMerge.js';
+import { validateModPatch } from './engines/modContract.js';
 import {
   createWorldClockEngine,
   deriveCalendarDate,
@@ -5105,6 +5106,241 @@ console.log('\n=== Section SM: schemaMerge — pure three-verb patch merge (recu
 }
 
 console.log('\nSection SM PASSED: mergeSchemas implements the three-verb patch grammar (object-recurse, wholesale-replace, $remove-delete) purely — siblings survive at every level, arrays replace whole, $remove is idempotent on an absent key, new keys may be introduced, and the real frozen base_vanilla schema is never mutated');
+
+// --- Section MC: modContract — hard-block structural/safety validation of a
+// mod patch before it ever reaches mergeSchemas (prototype-pollution keys,
+// depth/breadth/size limits, non-JSON-safe values, malformed $remove
+// sentinels, object-shaped base config clobbered by a bad patch value) ------
+console.log('\n=== Section MC: modContract (prototype-pollution keys, size/depth/breadth limits, non-JSON-safe values, malformed $remove, object-shaped base clobbered) ===');
+
+{
+  // MC1: a clean, well-formed patch (scalar override + nested object merge + well-formed $remove) is valid with no errors.
+  const mc1Base = getSchema();
+  const mc1Patch = {
+    combat: { maxEnemiesPerEncounter: 9 },
+    relationships: { divergence: { complicated: { affectionMin: 999 } } },
+    economy: { $remove: true },
+  };
+  const mc1Result = validateModPatch(mc1Patch, mc1Base);
+  assert.deepEqual(mc1Result, { valid: true, errors: [] }, 'a normal scalar override, a nested object merge, and a well-formed $remove together produce no errors');
+  console.log('MC1 PASSED: a clean, well-formed patch (scalar override, nested merge, well-formed $remove) validates with valid:true and an empty errors array');
+}
+
+{
+  // MC2: __proto__ at the top level is a forbidden key.
+  const mc2Patch = JSON.parse('{"__proto__":{"polluted":true}}');
+  const mc2Result = validateModPatch(mc2Patch, getSchema());
+  assert.equal(mc2Result.valid, false, 'a top-level __proto__ key must invalidate the patch');
+  assert.ok(mc2Result.errors.some((e) => e.path === '__proto__' && /Forbidden key/.test(e.message)), 'the forbidden-key error is reported at path "__proto__"');
+  console.log('MC2 PASSED: a top-level __proto__ key (a real own enumerable property, as JSON.parse produces) is reported as a forbidden key');
+}
+
+{
+  // MC3: __proto__ nested several levels deep is still caught.
+  const mc3Patch = JSON.parse('{"combat":{"nested":{"__proto__":{"polluted":true}}}}');
+  const mc3Result = validateModPatch(mc3Patch, getSchema());
+  assert.equal(mc3Result.valid, false, 'a deeply nested __proto__ key must invalidate the patch');
+  assert.ok(mc3Result.errors.some((e) => e.path === 'combat.nested.__proto__'), 'the forbidden-key error is reported at the full nested path');
+  console.log('MC3 PASSED: __proto__ nested several levels deep is reported at its full dot-path');
+}
+
+{
+  // MC4: __proto__ inside an object nested inside an array element — proves array descent for check 1.
+  const mc4Patch = JSON.parse('{"items":[{"__proto__":{"polluted":true}}]}');
+  const mc4Result = validateModPatch(mc4Patch, getSchema());
+  assert.equal(mc4Result.valid, false, 'a __proto__ key hidden inside an array element must still invalidate the patch');
+  assert.ok(mc4Result.errors.some((e) => e.path === 'items[0].__proto__'), 'the forbidden-key error is reported at the array-indexed path');
+  console.log('MC4 PASSED: a __proto__ key inside an object nested inside an array element is caught, proving the walker recurses through array elements');
+}
+
+{
+  // MC5: constructor and prototype keys are forbidden the same as __proto__.
+  const mc5Patch = { constructor: { evil: 1 }, prototype: { evil: 2 } };
+  const mc5Result = validateModPatch(mc5Patch, getSchema());
+  assert.equal(mc5Result.valid, false, 'constructor/prototype keys must invalidate the patch');
+  assert.ok(mc5Result.errors.some((e) => e.path === 'constructor'), 'constructor is reported as a forbidden key');
+  assert.ok(mc5Result.errors.some((e) => e.path === 'prototype'), 'prototype is reported as a forbidden key');
+  console.log('MC5 PASSED: constructor and prototype keys are forbidden exactly like __proto__');
+}
+
+{
+  // MC6: exceeding MAX_DEPTH is reported once at the point the limit is first crossed; a shallow sibling is still fully checked.
+  function buildDeepChain(n) {
+    let node = { veryDeepLeaf: true };
+    for (let i = 0; i < n; i++) node = { nested: node };
+    return node;
+  }
+  const mc6Patch = { deep: buildDeepChain(30), combat: { maxEnemiesPerEncounter: 4 } };
+  const mc6Result = validateModPatch(mc6Patch, getSchema());
+  assert.equal(mc6Result.valid, false, 'a patch nested past MAX_DEPTH must invalidate the patch');
+  const mc6DepthErrors = mc6Result.errors.filter((e) => /nesting depth/.test(e.message));
+  assert.equal(mc6DepthErrors.length, 1, 'exceeding max depth is reported exactly once for a single deep branch, not cascaded for every level past the limit');
+  assert.ok(!mc6Result.errors.some((e) => e.path.startsWith('combat')), 'a sibling branch at legal depth (combat) produces no errors of its own');
+  console.log('MC6 PASSED: a patch nested past MAX_DEPTH is reported once at the point the limit is crossed, without affecting a sibling branch at legal depth');
+}
+
+{
+  // MC7: an array exceeding MAX_ARRAY_LENGTH is reported with the actual length.
+  const mc7Patch = { items: new Array(10001).fill(0) };
+  const mc7Result = validateModPatch(mc7Patch, getSchema());
+  assert.equal(mc7Result.valid, false, 'an array past MAX_ARRAY_LENGTH must invalidate the patch');
+  assert.ok(mc7Result.errors.some((e) => e.path === 'items' && e.message.includes('10001')), 'the array-length error names the actual element count');
+  console.log('MC7 PASSED: an array exceeding MAX_ARRAY_LENGTH is reported at its own path with the actual length');
+}
+
+{
+  // MC8: exceeding MAX_SERIALIZED_SIZE (2MB) is reported; a normal-sized patch is not.
+  const mc8BigPatch = { bigField: 'x'.repeat(2 * 1024 * 1024 + 100) };
+  const mc8BigResult = validateModPatch(mc8BigPatch, getSchema());
+  assert.equal(mc8BigResult.valid, false, 'a patch serializing past 2MB must invalidate the patch');
+  assert.ok(mc8BigResult.errors.some((e) => e.path === '' && /exceeding the maximum/.test(e.message)), 'the size error is reported at the whole-patch path with the actual size named');
+  const mc8SmallResult = validateModPatch({ combat: { maxEnemiesPerEncounter: 3 } }, getSchema());
+  assert.ok(!mc8SmallResult.errors.some((e) => e.message.includes('2MB')), 'a normal-sized patch does not trigger the size limit');
+  console.log('MC8 PASSED: a patch whose serialized size exceeds 2MB is reported; an ordinary small patch is not');
+}
+
+{
+  // MC9: a function value anywhere in the tree is reported.
+  const mc9Patch = { badFn: function () {}, nested: { alsoFn: () => {} } };
+  const mc9Result = validateModPatch(mc9Patch, getSchema());
+  assert.equal(mc9Result.valid, false, 'a function value must invalidate the patch');
+  assert.ok(mc9Result.errors.some((e) => e.path === 'badFn'), 'a top-level function value is reported');
+  assert.ok(mc9Result.errors.some((e) => e.path === 'nested.alsoFn'), 'a nested function value is reported');
+  console.log('MC9 PASSED: function values, top-level and nested, are reported as non-JSON-safe');
+}
+
+{
+  // MC10: a Symbol value anywhere in the tree is reported.
+  const mc10Patch = { badSym: Symbol('polluted') };
+  const mc10Result = validateModPatch(mc10Patch, getSchema());
+  assert.equal(mc10Result.valid, false, 'a Symbol value must invalidate the patch');
+  assert.ok(mc10Result.errors.some((e) => e.path === 'badSym'), 'a Symbol value is reported as non-JSON-safe');
+  console.log('MC10 PASSED: a Symbol value is reported as non-JSON-safe');
+}
+
+{
+  // MC11: an explicit undefined on a present key is reported at every depth; an omitted key is not.
+  const mc11Patch = {
+    a: undefined,
+    nested: { b: undefined },
+    items: [{ c: undefined }],
+    normalKey: 5,
+  };
+  const mc11Result = validateModPatch(mc11Patch, getSchema());
+  assert.equal(mc11Result.valid, false, 'an explicit undefined value must invalidate the patch');
+  assert.ok(mc11Result.errors.some((e) => e.path === 'a'), 'a top-level explicit undefined is reported');
+  assert.ok(mc11Result.errors.some((e) => e.path === 'nested.b'), 'a nested explicit undefined is reported');
+  assert.ok(mc11Result.errors.some((e) => e.path === 'items[0].c'), 'an explicit undefined inside an array element is reported');
+  assert.ok(!mc11Result.errors.some((e) => e.path === 'normalKey'), 'a normal present key produces no undefined-related error');
+  const mc11OmittedResult = validateModPatch({ normalKey: 5 }, getSchema());
+  assert.equal(mc11OmittedResult.valid, true, 'omitting a key entirely (rather than setting it to undefined) is not an error');
+  console.log('MC11 PASSED: an explicit undefined on a present key is reported at top level, nested, and inside an array element; an omitted key is not flagged');
+}
+
+{
+  // MC12: a well-formed { $remove: true } produces no error, including where it legitimately replaces an object-shaped base path.
+  const mc12Patch = { combat: { $remove: true } };
+  const mc12Result = validateModPatch(mc12Patch, getSchema());
+  assert.deepEqual(mc12Result, { valid: true, errors: [] }, 'a well-formed $remove sentinel, including one removing an object-shaped base path, produces no errors');
+  console.log('MC12 PASSED: a well-formed { $remove: true } sentinel never triggers check 4 or check 5, even when it replaces an object-shaped base path');
+}
+
+{
+  // MC13: { $remove: "true" } (string, not boolean) is malformed.
+  const mc13Patch = { combat: { $remove: 'true' } };
+  const mc13Result = validateModPatch(mc13Patch, getSchema());
+  assert.equal(mc13Result.valid, false, 'a $remove sentinel with a string value instead of boolean true must be malformed');
+  assert.ok(mc13Result.errors.some((e) => e.path === 'combat' && /Malformed \$remove/.test(e.message)), "the malformed-$remove error is reported at the sentinel's own path");
+  console.log('MC13 PASSED: { $remove: "true" } (string, not the strict boolean true) is reported as a malformed sentinel');
+}
+
+{
+  // MC14: { $remove: true, otherKey: 1 } (extra key) is malformed.
+  const mc14Patch = { combat: { $remove: true, otherKey: 1 } };
+  const mc14Result = validateModPatch(mc14Patch, getSchema());
+  assert.equal(mc14Result.valid, false, 'a $remove sentinel with an extra sibling key must be malformed');
+  assert.ok(mc14Result.errors.some((e) => e.path === 'combat' && /Malformed \$remove/.test(e.message)), "the malformed-$remove error is reported at the sentinel's own path");
+  console.log('MC14 PASSED: { $remove: true, otherKey: 1 } (extra key) is reported as a malformed sentinel');
+}
+
+{
+  // MC15: replacing an object-shaped base path (combat) with a bare scalar is reported, naming the clobbered domain.
+  const mc15Base = getSchema();
+  const mc15Patch = { combat: 5 };
+  const mc15Result = validateModPatch(mc15Patch, mc15Base);
+  assert.equal(mc15Result.valid, false, 'replacing an object-shaped base path with a bare scalar must invalidate the patch');
+  const mc15Error = mc15Result.errors.find((e) => e.path === 'combat');
+  assert.ok(mc15Error, 'the clobbered-object error is reported at the "combat" path');
+  assert.ok(mc15Error.message.includes('combat'), 'the error message names the clobbered "combat" path');
+  assert.ok(mc15Error.message.includes(String(Object.keys(mc15Base.combat).length)), 'the error message names how many base keys under "combat" would be silently discarded');
+  console.log(`MC15 PASSED: replacing the object-shaped "combat" domain (base defines ${Object.keys(mc15Base.combat).length} keys there) with a bare scalar is reported, naming the clobbered path and key count`);
+}
+
+{
+  // MC16: a brand-new top-level key base doesn't have at all is not a check-5 violation.
+  const mc16Base = getSchema();
+  assert.ok(!('modSpecificSection' in mc16Base), 'sanity: fixture key absent from base');
+  const mc16Patch = { modSpecificSection: { newKnob: 42 } };
+  const mc16Result = validateModPatch(mc16Patch, mc16Base);
+  assert.deepEqual(mc16Result, { valid: true, errors: [] }, 'introducing a brand-new top-level key base does not have at all produces no errors');
+  console.log('MC16 PASSED: a patch introducing a brand-new key absent from base is legal and produces no check-5 error');
+}
+
+{
+  // MC17: check 5 does not fire across an array boundary — a wholesale array replacement is legal even when element shapes differ from base.
+  const mc17Base = getSchema();
+  assert.ok(Array.isArray(mc17Base.relationships.tierThresholds) && typeof mc17Base.relationships.tierThresholds[0] === 'object', 'sanity: base tierThresholds is an array of objects');
+  const mc17Patch = { relationships: { tierThresholds: ['only-tier-scalar', 'another-scalar'] } };
+  const mc17Result = validateModPatch(mc17Patch, mc17Base);
+  assert.deepEqual(mc17Result, { valid: true, errors: [] }, 'wholesale-replacing an array of objects with a differently-shaped array is legal and produces no check-5 error');
+  console.log('MC17 PASSED: replacing an array of objects with a differently-shaped array is a legal wholesale replace — check 5 does not fire across the array boundary');
+}
+
+{
+  // MC18: accumulation — multiple independent violations in one patch are all reported in a single call.
+  const mc18ProtoPart = JSON.parse('{"__proto__":{"evil":true}}');
+  const mc18Patch = { ...mc18ProtoPart, items: new Array(10001).fill(1), combat: 42 };
+  const mc18Result = validateModPatch(mc18Patch, getSchema());
+  assert.equal(mc18Result.valid, false, 'a patch with several independent violations must invalidate');
+  assert.ok(mc18Result.errors.some((e) => e.path === '__proto__'), 'the forbidden-key violation is present');
+  assert.ok(mc18Result.errors.some((e) => e.path === 'items'), 'the oversized-array violation is present');
+  assert.ok(mc18Result.errors.some((e) => e.path === 'combat'), 'the clobbered-object violation is present');
+  assert.ok(mc18Result.errors.length >= 3, 'all violations are accumulated in one errors array rather than short-circuiting on the first (unlike ai/responseContract.js)');
+  console.log(`MC18 PASSED: a single patch with a forbidden key, an oversized array, and a clobbered object path all at once produces all ${mc18Result.errors.length} violations in one call, proving accumulation rather than short-circuiting`);
+}
+
+{
+  // MC19: a well-formed { $remove: true } sitting at the patch ROOT has no parent key to delete.
+  const mc19Patch = { $remove: true };
+  const mc19Result = validateModPatch(mc19Patch, getSchema());
+  assert.equal(mc19Result.valid, false, 'a root-level $remove sentinel must invalidate the patch even though its shape alone is well-formed');
+  assert.equal(mc19Result.errors.length, 1, 'the root-$remove violation is the only error (the shape check for $remove passes; only the position check fails)');
+  assert.ok(mc19Result.errors[0].path === '' && /no key to delete/.test(mc19Result.errors[0].message), 'the error explains that $remove at the root has no parent key to delete');
+  console.log('MC19 PASSED: { $remove: true } sitting at the patch root is reported — it has no parent key for $remove to delete');
+}
+
+{
+  // MC20: validateModPatch never mutates patch or base, proven against a hand-built pair carrying real violations and against the real frozen getSchema() output.
+  const mc20Base = structuredClone(getSchema());
+  const mc20Patch = { combat: 5, items: [{ nested: { a: 1 } }], extra: undefined };
+  const mc20BaseSnapshotBefore = structuredClone(mc20Base);
+  const mc20PatchSnapshotBefore = structuredClone(mc20Patch);
+  const mc20Result = validateModPatch(mc20Patch, mc20Base);
+  assert.ok(!mc20Result.valid, 'sanity: this patch carries real violations exercised for the mutation check');
+  assert.deepEqual(mc20Base, mc20BaseSnapshotBefore, 'base is byte-for-byte unchanged after validateModPatch, even though it found violations');
+  assert.deepEqual(mc20Patch, mc20PatchSnapshotBefore, 'patch is byte-for-byte unchanged after validateModPatch');
+
+  const mc20FrozenBase = getSchema();
+  assert.ok(Object.isFrozen(mc20FrozenBase), 'sanity: real getSchema() output is frozen');
+  const mc20FrozenSnapshotBefore = JSON.parse(JSON.stringify(mc20FrozenBase));
+  validateModPatch({ combat: 5 }, mc20FrozenBase);
+  const mc20FrozenSnapshotAfter = JSON.parse(JSON.stringify(mc20FrozenBase));
+  assert.deepEqual(mc20FrozenSnapshotAfter, mc20FrozenSnapshotBefore, 'getSchema() output is byte-for-byte identical before and after validateModPatch runs against it');
+  assert.equal(getSchema(), mc20FrozenBase, 'getSchema() keeps returning the same frozen object identity — validateModPatch never mutated or replaced it');
+  console.log('MC20 PASSED: validateModPatch never mutates patch or base, proven against a hand-built pair carrying real violations and against the real frozen getSchema() output');
+}
+
+console.log('\nSection MC PASSED: validateModPatch hard-blocks prototype-pollution keys (including inside array elements), oversized/over-deep/over-wide patches, non-JSON-safe values (functions, Symbols, explicit undefined), malformed near-$remove sentinels (including a well-formed one stranded at the patch root with no key to delete), and any patch value that would silently clobber an object-shaped base config — accumulating every violation in one pass rather than short-circuiting on the first, and proven not to mutate or corrupt the real frozen getSchema() output');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed
