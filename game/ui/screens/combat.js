@@ -49,15 +49,8 @@ export function renderCombat(ui) {
   // Action bar — one press resolves a full round.
   const actionBar = buildActionBar(ui, m, targetId);
 
-  // Round log — the last round's blow-by-blow.
-  const logPanel = div(panelStyle('padding:10px 12px; display:flex; flex-direction:column; gap:5px;'), {
-    children: [
-      div(sectionLabelStyle(), { text: 'Last round' }),
-      ...(m.lastActions.length
-        ? m.lastActions.map((line) => div('font:400 11.5px Inter,sans-serif; color:var(--text-muted); line-height:1.4;', { text: line }))
-        : [div('font:400 11.5px Inter,sans-serif; color:var(--text-faint);', { text: 'The fight begins…' })]),
-    ],
-  });
+  // Round log — the full scrollback, not just the last round.
+  const logPanel = buildRoundLogPanel(m);
 
   return div('display:flex; flex-direction:column; gap:10px; padding:10px; max-width:720px; margin:0 auto; min-height:calc(100vh - 92px);',
     { children: [header, strip, actionBar, logPanel] });
@@ -110,6 +103,31 @@ function buildActionBar(ui, m, targetId) {
       div(sectionLabelStyle(), { text: canAttack ? 'Your move' : 'No target' }),
       div('display:flex; flex-wrap:wrap; gap:8px;', { children: buttons }),
     ],
+  });
+}
+
+// --- round log: the full scrollback, oldest round first / newest at the
+// bottom (chat-log convention), auto-scrolled to the bottom on every render
+// so the latest round is always in view without extra state. ------------------
+function buildRoundLogPanel(m) {
+  const list = div('display:flex; flex-direction:column; gap:2px; overflow-y:auto; max-height:220px;');
+  if (m.roundLog.length === 0) {
+    list.appendChild(div('font:400 11.5px Inter,sans-serif; color:var(--text-faint);', { text: 'The fight begins…' }));
+  } else {
+    m.roundLog.forEach((block, i) => {
+      list.appendChild(div(
+        "font:600 9.5px 'Barlow Semi Condensed',sans-serif; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.05em;"
+        + (i > 0 ? ' margin-top:4px; padding-top:5px; border-top:1px solid var(--border);' : ''),
+        { text: `Round ${block.round + 1}` }
+      ));
+      for (const line of block.lines) {
+        list.appendChild(div('font:400 11.5px Inter,sans-serif; color:var(--text-muted); line-height:1.4;', { text: line }));
+      }
+    });
+    requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
+  }
+  return div(panelStyle('padding:10px 12px; display:flex; flex-direction:column; gap:5px;'), {
+    children: [div(sectionLabelStyle(), { text: 'Combat log' }), list],
   });
 }
 

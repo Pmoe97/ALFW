@@ -9,7 +9,7 @@ import { div, span, el, button } from '../dom.js';
 import { buildTravel } from '../model.js';
 import {
   panelStyle, sectionLabelStyle, primaryActionButtonStyle, smallAccentButtonStyle,
-  riskChipStyle, riskLabelFor,
+  riskChipStyle, riskLabelFor, barTrackStyle, barFillStyle, accentPillStyle,
 } from '../styles.js';
 import { renderMapSvg } from '../mapSvg.js';
 
@@ -20,16 +20,45 @@ export function renderTravel(ui) {
   const hereId = engines.travel.getPlayerNodeId();
   if (!engines.map.isMaterialized(hereId)) engines.map.materializeNeighbors(hereId);
 
-  return ui.state.travelVariant === 'b' ? travelLedger(ui) : travelMapFirst(ui);
+  const m = buildTravel(ui.ctx);
+  // An open travel leg replaces the destination-picker with an in-transit
+  // view — scoped to this screen's own render (an open explore window keeps
+  // the existing disabled-buttons treatment, unchanged).
+  if (m.activeLeg) return inTransitView(m);
+  return ui.state.travelVariant === 'b' ? travelLedger(ui, m) : travelMapFirst(ui, m);
 }
 
 function busyOf(m) {
   return m.activity !== null && m.activity !== undefined;
 }
 
+// ---- In-transit: replaces the picker while a travel leg is open -----------
+function inTransitView(m) {
+  const leg = m.activeLeg;
+  const panel = div(panelStyle('padding:16px; display:flex; flex-direction:column; gap:12px;'), {
+    children: [
+      div(sectionLabelStyle(), { text: 'Traveling' }),
+      div("font:700 18px 'Barlow Semi Condensed',sans-serif; color:var(--text);", { text: `En route to ${leg.destinationLabel}` }),
+      div(barTrackStyle(8), { children: [div(barFillStyle(leg.progressPct))] }),
+      div('display:flex; justify-content:space-between; font:500 10.5px Inter,sans-serif; color:var(--text-faint);', {
+        children: [
+          span('', { text: `${leg.distanceRemaining} distance remaining` }),
+          span('', { text: `${leg.timeRemaining} remaining` }),
+        ],
+      }),
+      leg.narration ? div('display:flex; flex-direction:column; gap:6px;', { children: [
+        leg.categoryLabel ? span(accentPillStyle() + ' align-self:flex-start;', { text: leg.categoryLabel }) : null,
+        div('font:400 12px Inter,sans-serif; color:var(--text-muted); line-height:1.5; font-style:italic;', { text: leg.narration }),
+      ] }) : null,
+    ],
+  });
+  return div('padding:10px; min-height:calc(100vh - 92px); display:flex; align-items:flex-start; justify-content:center;', {
+    children: [div('width:100%; max-width:480px; margin-top:40px;', { children: [panel] })],
+  });
+}
+
 // ---- Variant A: map-first --------------------------------------------------
-function travelMapFirst(ui) {
-  const m = buildTravel(ui.ctx);
+function travelMapFirst(ui, m) {
   const busy = busyOf(m);
 
   const mapPanel = div('position:relative; ' + panelStyle('overflow:hidden; min-height:360px;'));
@@ -56,8 +85,7 @@ function travelMapFirst(ui) {
 }
 
 // ---- Variant B: ledger -----------------------------------------------------
-function travelLedger(ui) {
-  const m = buildTravel(ui.ctx);
+function travelLedger(ui, m) {
   const busy = busyOf(m);
 
   const miniMap = div(panelStyle('overflow:hidden;'));

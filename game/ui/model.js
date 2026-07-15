@@ -163,11 +163,33 @@ export function buildTravel(ctx) {
     }))
     .reverse();
 
+  // activeLeg — the in-transit view's data, derived only for an open TRAVEL
+  // leg (an open explore window is left to the existing disabled-buttons
+  // treatment). Nothing new is tracked: getActiveActivity/getIncident are
+  // already-committed engine reads, same discipline as the rest of this file.
+  const activity = engines.travel.getActiveActivity();
+  let activeLeg = null;
+  if (activity && activity.kind === 'travel') {
+    const toNode = engines.map.getNode(activity.toNodeId);
+    const remainingSeconds = Math.max(0, activity.durationGameSeconds - activity.elapsedGameSeconds);
+    const incident = engines.travel.getIncident(activity.legIndex);
+    activeLeg = {
+      destinationLabel: toNode ? nodeLabel(toNode) : '(unmapped)',
+      progressPct: activity.durationGameSeconds > 0
+        ? Math.min(100, (activity.elapsedGameSeconds / activity.durationGameSeconds) * 100) : 100,
+      timeRemaining: formatDuration(remainingSeconds),
+      distanceRemaining: (remainingSeconds / secPerUnit).toFixed(1),
+      categoryLabel: incident ? incidentCategoryLabel(incident.category) : null,
+      narration: incident ? (incident.narration || '(narration pending…)') : null,
+    };
+  }
+
   return {
     here,
     hereLabel: nodeLabel(here),
     hereSub: nodeSubLabel(here, faction),
-    activity: engines.travel.getActiveActivity(),
+    activity,
+    activeLeg,
     destinations,
     incidents,
     // POI "seek out" targets the player actually holds reveal authority for.
@@ -575,22 +597,15 @@ export function buildCombat(ctx) {
     playerWeapon: player_?.weapon ?? null,
     round: active.round,
     consumables,
-    // the most recent round's per-actor lines, for the log panel
-    lastActions: buildLastRoundLog(ctx, active),
+    // every resolved round's per-actor lines, oldest first, for the scrollback
+    // log panel — not just the last round.
+    roundLog: buildRoundLog(ctx, active),
   };
 }
 
-// buildLastRoundLog — reconstruct the last COMBAT_ROUND_RESOLVED into readable
-// lines. Reads the raw log (the combat engine commits full action facts).
-function buildLastRoundLog(ctx, active) {
-  const log = ctx.world.getEventLog();
-  let last = null;
-  for (const entry of log) {
-    if (entry.type === 'COMBAT_ROUND_RESOLVED' && entry.payload.combatId === active.combatId) last = entry.payload;
-  }
-  if (!last) return [];
-  const nameOf = (id) => active.combatants.find((c) => c.id === id)?.name ?? id;
-  return last.actions.map((a) => {
+// formatRoundActions — one COMBAT_ROUND_RESOLVED's actions into readable lines.
+function formatRoundActions(actions, nameOf) {
+  return actions.map((a) => {
     if (a.action === 'skip' || a.action === 'wait') return `${nameOf(a.actorId)} holds.`;
     if (a.action === 'flee') return a.fleeSuccess ? `${nameOf(a.actorId)} breaks away and flees!` : `${nameOf(a.actorId)} tries to flee, but is cut off.`;
     if (a.action === 'useItem') return `${nameOf(a.actorId)} uses an item (+${a.healed ?? 0} HP).`;
@@ -598,6 +613,22 @@ function buildLastRoundLog(ctx, active) {
     const killed = a.targetStatusAfter === 'dead' ? ' — slain!' : a.targetStatusAfter === 'subdued' ? ' — subdued!' : '';
     return `${nameOf(a.actorId)} hits ${nameOf(a.targetId)} for ${a.damage}${killed}`;
   });
+}
+
+// buildRoundLog — reconstruct EVERY COMBAT_ROUND_RESOLVED for the active
+// combat's combatId into { round, lines } blocks, in round order (log order).
+// Reads the raw log (the combat engine commits full action facts); the whole
+// scrollback, not just the last round.
+function buildRoundLog(ctx, active) {
+  const log = ctx.world.getEventLog();
+  const nameOf = (id) => active.combatants.find((c) => c.id === id)?.name ?? id;
+  const blocks = [];
+  for (const entry of log) {
+    if (entry.type === 'COMBAT_ROUND_RESOLVED' && entry.payload.combatId === active.combatId) {
+      blocks.push({ round: entry.payload.round, lines: formatRoundActions(entry.payload.actions, nameOf) });
+    }
+  }
+  return blocks;
 }
 
 // Shared: relationship tier ladder labels (for a legend, if needed).

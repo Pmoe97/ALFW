@@ -140,7 +140,7 @@ import {
   getArchetype,
   getEncounterTemplate,
 } from './engines/combatData.js';
-import { INVENTORY_CATEGORIES, CRAFT_STATIONS } from './game/ui/model.js';
+import { INVENTORY_CATEGORIES, CRAFT_STATIONS, buildCombat } from './game/ui/model.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
@@ -4270,6 +4270,32 @@ function runSectionCB(record) {
     const equipAfter = w.economy.equip(w.rowanId, 'mainHand', null);
     assert.ok(equipAfter.ok, 'equip succeeds again once combat has ended — the guard is not permanently stuck');
     record('CB8 PASSED: trade/craft/equip/drop and quest accept/complete/abandon all refuse with a consistent reason while a fight is open, and the guard lifts cleanly once combat ends');
+  }
+
+  // --- CB9: UI model round-log scrollback — buildCombat's roundLog must
+  // reconstruct EVERY resolved round of the active fight, in ascending round
+  // order, not just the last one (the combat-log scrollback gap the UI used
+  // to have when it only ever rebuilt the final COMBAT_ROUND_RESOLVED).
+  {
+    const w = cbBuild();
+    cbGiveWeapon(w, 'iron_sword');
+    w.combat.startCombat('tmpl_bandit_ambush', w.map.getOriginNode());
+    const uiCtx = { engines: { combat: w.combat, economy: w.economy }, player: { id: w.rowanId }, world: w.world };
+
+    let roundsObserved = 0;
+    for (let i = 0; w.combat.getActiveCombat() && i < 60; i++) {
+      const en = cbFirstLiveEnemy(w.combat);
+      w.combat.act(en ? { type: 'attackLethal', targetId: en.id } : { type: 'wait' });
+      const active = w.combat.getActiveCombat();
+      if (!active) break;
+      const m = buildCombat(uiCtx);
+      roundsObserved = active.round;
+      assert.equal(m.roundLog.length, active.round, `after round ${active.round - 1} resolves, roundLog holds all ${active.round} completed round(s), not just the last`);
+      assert.deepEqual(m.roundLog.map((b) => b.round), Array.from({ length: active.round }, (_, k) => k), 'roundLog rounds are every round 0..N-1, in ascending order');
+      assert.ok(m.roundLog.every((b) => b.lines.length > 0), 'every reconstructed round has at least one action line');
+    }
+    assert.ok(roundsObserved >= 2, 'CB9 fixture must run at least two rounds to actually exercise scrollback (not just the last-round case)');
+    record(`CB9 PASSED: buildCombat's roundLog reconstructs every resolved round (not just the last) in ascending order, observed across ${roundsObserved} rounds`);
   }
 
   return { log: cbBuild(forceIncident('bandit', 2)).world.getEventLog() };
