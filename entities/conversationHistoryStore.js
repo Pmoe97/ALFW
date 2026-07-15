@@ -16,6 +16,8 @@
 // No registry dependency: like relationshipStore, this store never mutates
 // entity objects, so it only ever needs the world.
 
+import { getSchema } from '../engines/activeSchema.js';
+
 const DIALOGUE_LINE = 'DIALOGUE_LINE';
 
 // The canonical, order-independent key for a pair. Sorting collapses
@@ -46,7 +48,7 @@ export function deriveConversationHistory(log, idA, idB) {
 // accent-phrase seed list. Provisional first-pass balance, retune here
 // freely. Counted in EXCHANGES (one player line + one NPC line), not raw
 // lines, since a "turn" is the natural unit of conversational recency.
-export const RECENT_EXCHANGES_WINDOW = 4;
+export const RECENT_EXCHANGES_WINDOW = getSchema().conversation.recentExchangesWindow;
 
 export function getRecentHistory(fullHistory, windowSize = RECENT_EXCHANGES_WINDOW) {
   return fullHistory.slice(-(windowSize * 2));

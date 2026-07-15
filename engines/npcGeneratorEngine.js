@@ -42,6 +42,7 @@ import { mulberry32 } from '../worldState.js';
 import { hashCoords, mapSeed } from './worldMapEngine.js';
 import { weightedPick, deriveBaselinePois } from './poiEngine.js';
 import { deriveTimeOfDayBucket } from './worldClockEngine.js';
+import { getSchema } from './activeSchema.js';
 import { getSchemaDiff, resolveFieldList, resolveFieldValue } from '../entities/fieldSchema.js';
 import {
   createNpc,
@@ -167,12 +168,7 @@ export const NOCTURNAL_VOCATIONS = Object.freeze(['outlaw', 'poacher']);
 export const RELATIONSHIP_STATUSES = Object.freeze(['single', 'single', 'married', 'widowed', 'courting']); // single repeated = cheap weighting
 export const LIVING_SITUATIONS_SETTLEMENT = Object.freeze(['lives alone in a small home', 'lives with family', 'rents a room above the workplace', 'lives at the edge of the settlement', 'shares a crowded boarding house']);
 export const LIVING_SITUATIONS_WILDERNESS = Object.freeze(['camps rough, moving with the seasons', 'keeps a lone cabin off the trails', 'shelters in a cave dug into the hillside', 'lives out of a wagon']);
-export const SEXUAL_ORIENTATIONS = Object.freeze([
-  { name: 'heterosexual', weight: 6 },
-  { name: 'bisexual', weight: 2 },
-  { name: 'homosexual', weight: 1 },
-  { name: 'asexual', weight: 1 },
-]);
+export const SEXUAL_ORIENTATIONS = getSchema().npcGenerator.sexualOrientations;
 export const PERSONALITY_TRAITS = Object.freeze(['warm', 'guarded', 'curious', 'blunt', 'patient', 'quick-tempered', 'superstitious', 'pragmatic', 'dryly humorous', 'earnest', 'stubborn', 'easygoing']);
 export const HOBBIES = Object.freeze(['whittling', 'card games', 'dice', 'fishing', 'gossip', 'singing', 'gardening', 'collecting odd stones', 'mending', 'charcoal sketches']);
 export const LIKES = Object.freeze(['a warm meal', 'fair trade', 'quiet mornings', 'a good story', 'strong drink', 'festival days', 'honest work', 'rainy evenings']);
@@ -247,6 +243,7 @@ export function deriveNpc(config, node, enabledRaces, i) {
   const { kx, ky } = nodeKeys(node);
   const rng = mulberry32(hashCoords(seed, NPC_SALT + i, kx, ky));
   const kind = node.classification.kind;
+  const gen = getSchema().npcGenerator;
 
   // 1. race — weightedPick over the (sorted-by-id) enabled races.
   const raceId = weightedPick(enabledRaces.map((r) => ({ name: r.id, weight: r.weight })), rng());
@@ -310,7 +307,7 @@ export function deriveNpc(config, node, enabledRaces, i) {
   }
 
   // 10. distinguishing features (0-2) + intimate set.
-  const featureCount = pickInt(rng, 0, 2);
+  const featureCount = pickInt(rng, gen.distinguishingFeatureCount.min, gen.distinguishingFeatureCount.max);
   if (featureCount === 1) appearance.distinguishingFeatures = [pick(rng, DISTINGUISHING_FEATURES)];
   if (featureCount === 2) appearance.distinguishingFeatures = pickTwo(rng, DISTINGUISHING_FEATURES);
   appearance.intimate = [
@@ -327,18 +324,19 @@ export function deriveNpc(config, node, enabledRaces, i) {
   const personalityAxes = {};
   for (const axis of PERSONALITY_AXES) {
     const prior = race.axisPriors[axis] ?? 5;
-    personalityAxes[axis] = Math.max(0, Math.min(10, Math.round(prior + (rng() * 2 - 1) * 2)));
+    const jitter = gen.personalityJitter;
+    personalityAxes[axis] = Math.max(jitter.min, Math.min(jitter.max, Math.round(prior + (rng() * 2 - 1) * jitter.magnitude)));
   }
 
   // 12-13. traits, capabilities — modest, vocation-agnostic rolls (attribute
   // 8-15 matching the hand-authored range; skills are shallow investments).
   const personalityTraits = pickTwo(rng, PERSONALITY_TRAITS);
   const attributes = {};
-  for (const attr of ATTRIBUTE_NAMES) attributes[attr] = 8 + Math.floor(rng() * 8);
+  for (const attr of ATTRIBUTE_NAMES) attributes[attr] = gen.attributeRoll.base + Math.floor(rng() * gen.attributeRoll.spread);
   const primary = {};
-  for (const skill of Object.keys(PRIMARY_SKILL_ATTRIBUTE)) primary[skill] = Math.floor(rng() * 5);
+  for (const skill of Object.keys(PRIMARY_SKILL_ATTRIBUTE)) primary[skill] = Math.floor(rng() * gen.primarySkillRoll.spread);
   const secondary = {};
-  for (const skill of SECONDARY_SKILLS) secondary[skill] = Math.floor(rng() * 3);
+  for (const skill of SECONDARY_SKILLS) secondary[skill] = Math.floor(rng() * gen.secondarySkillRoll.spread);
 
   // 14. flavor — hobbies/likes/dislikes and voice. Accent stays a permanent
   // independent roll (a cultural/racial trait). Voice DIRECTIVES, by contrast,
@@ -428,6 +426,7 @@ export function deriveNpc(config, node, enabledRaces, i) {
 // schedules are deferred (see the header note on lazy node generation).
 export function deriveSchedulePattern(config, node, vocation, shiftDraw, socialDraw) {
   const pois = deriveBaselinePois(config, node);
+  const schedule = getSchema().npcGenerator.schedule;
   const category = VOCATION_WORKPLACE_CATEGORY[vocation] ?? null;
   const workplace = category ? pois.find((p) => p.category === category) : undefined;
   const workLocationId = workplace ? workplace.id : 'out_and_about';
@@ -435,7 +434,7 @@ export function deriveSchedulePattern(config, node, vocation, shiftDraw, socialD
     ? `working as a ${vocation}`
     : `out and about, working as a ${vocation}`;
   const nocturnal =
-    NOCTURNAL_VOCATIONS.includes(vocation) || (vocation === 'guard' && shiftDraw < 0.5);
+    NOCTURNAL_VOCATIONS.includes(vocation) || (vocation === 'guard' && shiftDraw < schedule.nocturnalShiftThreshold);
 
   if (nocturnal) {
     return [
@@ -446,7 +445,7 @@ export function deriveSchedulePattern(config, node, vocation, shiftDraw, socialD
     ];
   }
   const tavern = pois.find((p) => p.category === 'tavern');
-  const evening = socialDraw < 0.5 && tavern
+  const evening = socialDraw < schedule.tavernEveningThreshold && tavern
     ? { timeOfDay: 'evening', locationId: tavern.id, activity: 'passing the evening at the tavern', availability: 'awake' }
     : { timeOfDay: 'evening', locationId: 'home', activity: 'settling in at home', availability: 'awake' };
   return [

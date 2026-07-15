@@ -38,6 +38,7 @@ import { hashCoords, mapSeed } from './worldMapEngine.js';
 import { nodeKeys } from './poiEngine.js';
 import { effectiveSkill } from '../entities/entitySchema.js';
 import { getItemDef } from './economyData.js';
+import { getSchema } from './activeSchema.js';
 import {
   COMBAT_SALT, COMBAT_SALT_STRIDE, MAX_ENEMIES,
   getArchetype, getEncounterTemplate, INCIDENT_ENCOUNTERS,
@@ -85,7 +86,7 @@ function readCombat(config) {
 // {capabilities:{attributes, skills}} shape (player entity OR an enemy
 // combatant record), so combatants carry their full capabilities snapshot.
 export function deriveMaxHp(entityLike) {
-  return 2 * entityLike.capabilities.attributes.toughness + effectiveSkill(entityLike, 'fortitude');
+  return getSchema().combat.maxHpToughnessMultiplier * entityLike.capabilities.attributes.toughness + effectiveSkill(entityLike, 'fortitude');
 }
 
 // Wrap an archetype's flat {attributes, skills:{...}} into the entity
@@ -319,6 +320,7 @@ export function deriveCombatHistory(log) {
 // Returns { actions, hpAfter, statusAfter, ended, outcome, mode, itemUse }.
 export function resolveRound(config, active, playerId, playerAction, rng) {
   const c = readCombat(config);
+  const schema = getSchema().combat;
   const byId = new Map(active.combatants.map((x) => [x.id, { ...x, status: x.status ?? 'alive' }]));
   const isActive = (x) => x.status === 'alive';
   const enemies = () => [...byId.values()].filter((x) => x.side === 'enemy');
@@ -337,10 +339,10 @@ export function resolveRound(config, active, playerId, playerAction, rng) {
     const hit = hitDraw < hitChance;
     const record = { actorId: attacker.id, action: mode === 'nonlethal' ? 'attackNonlethal' : 'attackLethal', targetId: defender.id, mode, weaponDefId: w.defId, rolls: { hit: hitDraw, damage: dmgDraw }, hit };
     if (hit) {
-      const attrBonus = Math.floor((w.ranged ? attacker.capabilities.attributes.agility : attacker.capabilities.attributes.strength) / 4);
+      const attrBonus = Math.floor((w.ranged ? attacker.capabilities.attributes.agility : attacker.capabilities.attributes.strength) / schema.attackAttributeDivisor);
       let raw = w.damageBase + Math.floor(dmgDraw * (w.damageSpread + 1)) + attrBonus;
-      let dmg = Math.max(1, raw - defender.armorTotal);
-      if (mode === 'nonlethal' && !w.nonlethalCapable) dmg = Math.max(1, Math.floor(dmg * c.nonlethalDamageFactor));
+      let dmg = Math.max(schema.minDamage, raw - defender.armorTotal);
+      if (mode === 'nonlethal' && !w.nonlethalCapable) dmg = Math.max(schema.minDamage, Math.floor(dmg * c.nonlethalDamageFactor));
       const before = defender.hp;
       defender.hp = Math.max(0, defender.hp - dmg);
       if (defender.hp === 0) defender.status = mode === 'nonlethal' ? 'subdued' : 'dead';
@@ -366,7 +368,7 @@ export function resolveRound(config, active, playerId, playerAction, rng) {
     if (id === playerId) {
       const type = playerAction?.type ?? 'wait';
       if (type === 'flee') {
-        const fleeChance = clamp(c.fleeBaseChance + c.fleePerAgilityPoint * (effectiveSkill(actor, 'acrobatics') - Math.max(0, ...enemies().filter(isActive).map((e) => e.capabilities.attributes.agility))), 0.05, 0.95);
+        const fleeChance = clamp(c.fleeBaseChance + c.fleePerAgilityPoint * (effectiveSkill(actor, 'acrobatics') - Math.max(0, ...enemies().filter(isActive).map((e) => e.capabilities.attributes.agility))), schema.fleeChanceClamp.min, schema.fleeChanceClamp.max);
         const success = rng.hit < fleeChance;
         actions.push({ actorId: id, action: 'flee', rolls: { hit: rng.hit, damage: rng.dmg }, fleeSuccess: success });
         if (success) fled = true;

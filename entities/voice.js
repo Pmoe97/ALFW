@@ -33,6 +33,8 @@
 // independent dials. The ~3 cap below is then purely about brevity, NOT about
 // dodging conflicts.
 
+import { getSchema } from '../engines/activeSchema.js';
+
 // Provisional first-pass wording and thresholds — the ACTION_DELTAS /
 // TIER_THRESHOLDS style: retune here freely, no caller changes needed. Each
 // axis maps to { high, low } imperative lines (either may be null when that
@@ -79,9 +81,9 @@ const AXIS_PRIORITY = Object.freeze([
   'openness',
 ]);
 
-const HIGH_THRESHOLD = 7; // axis >= 7 fires the `high` line
-const LOW_THRESHOLD = 3; // axis <= 3 fires the `low` line
-export const MAX_DIRECTIVES = 3; // "fewer, sharper" — hard cap on the rendered set
+const HIGH_THRESHOLD = getSchema().voice.highThreshold; // axis >= threshold fires the `high` line
+const LOW_THRESHOLD = getSchema().voice.lowThreshold; // axis <= threshold fires the `low` line
+export const MAX_DIRECTIVES = getSchema().voice.maxDirectives; // "fewer, sharper" — hard cap on the rendered set
 const NEUTRAL_DIRECTIVE = 'Speak plainly and in character.';
 
 // CONFLICTING_PAIRS — belt-and-braces. EXPECTED EMPTY under the orthogonal

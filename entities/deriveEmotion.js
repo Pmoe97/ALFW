@@ -18,30 +18,26 @@
 // the same history always yields the same read — determinism without a cached
 // field. That equality is the load-bearing proof in proof.js.
 
+import { getSchema } from '../engines/activeSchema.js';
+
 // Valence per remembered event type. Signed magnitudes, provisional first-pass
 // balance (the ACTION_DELTAS / TIER_THRESHOLDS style — retune here freely).
 // Valence is a fact about the EVENT, looked up from the log by the memory's
 // seq; it is deliberately NOT stored on the MemoryRef, which stays {seq,
 // summary} — storing it would duplicate what seq -> log already gives.
-const MEMORY_VALENCE = Object.freeze({
-  PLAYER_HELPED: 2,
-  PLAYER_ROBBED: -4,
-  PLAYER_IGNORED: -1,
-});
+const MEMORY_VALENCE = getSchema().emotion.memoryValence;
 
 // Only the most recent memories color the current mood; older ones fade fast.
 // The k-th most recent memory (k = 1 is the latest) contributes with weight
-// 1/k^2, so the freshest interaction dominates the read with older ones as a
-// quickly-fading tail — a current mood is mostly about the latest thing.
-// Deterministic, no clock.
-const RECENCY_WINDOW = 5;
+// 1/k^DECAY_EXPONENT, so the freshest interaction dominates the read with
+// older ones as a quickly-fading tail — a current mood is mostly about the
+// latest thing. Deterministic, no clock.
+const RECENCY_WINDOW = getSchema().emotion.recencyWindow;
+const DECAY_EXPONENT = getSchema().emotion.decayExponent;
 
 // |netValence| band cutoffs for the human-readable intensity label.
-const INTENSITY_BANDS = Object.freeze([
-  { max: 1.0, band: 'mild' },
-  { max: 2.5, band: 'moderate' },
-  { max: Infinity, band: 'strong' },
-]);
+const INTENSITY_BANDS = getSchema().emotion.intensityBands
+  .map((b) => ({ ...b, max: b.max ?? Infinity }));
 
 // Centered axis value in [-1, 1]: 5 is neutral, 10 -> +1, 0 -> -1. A missing
 // axis reads as neutral (0). This is the single knob every propensity below is
@@ -65,29 +61,21 @@ function centered(axes, axis) {
 //                     globally in scoreEmotions, not per-entry)
 //   conscientiousness high -> betrayal reads as moral indignation / grudge
 //   openness       high -> curiosity/delight on the positive side (light touch)
-const EMOTIONS = Object.freeze([
-  // --- negative family (net valence < 0) ---
-  { name: 'indignant', sign: -1, propensity: (cx) => 1 + 0.8 * cx.dominance + 0.6 * cx.conscientiousness },
-  { name: 'angry', sign: -1, propensity: (cx) => 1 + 0.8 * cx.dominance - 0.7 * cx.agreeableness },
-  { name: 'resentful', sign: -1, propensity: (cx) => 1 - 0.7 * cx.agreeableness + 0.4 * cx.conscientiousness },
-  { name: 'hurt', sign: -1, propensity: (cx) => 1 - 0.8 * cx.dominance + 0.6 * cx.agreeableness },
-  { name: 'wary', sign: -1, propensity: (cx) => 1 - 0.6 * cx.dominance - 0.4 * cx.openness },
-  // --- positive family (net valence > 0) ---
-  { name: 'fond', sign: 1, propensity: (cx) => 1 + 0.8 * cx.agreeableness },
-  { name: 'grateful', sign: 1, propensity: (cx) => 1 + 0.5 * cx.agreeableness - 0.5 * cx.dominance },
-  { name: 'delighted', sign: 1, propensity: (cx) => 1 + 0.6 * cx.openness + 0.4 * cx.extraversion },
-  { name: 'pleased', sign: 1, propensity: () => 1 },
-  // --- neutral family (net valence ~ 0): the baseline read when little or
-  //     nothing recent weighs on the NPC. Scored off a small constant so it
-  //     only surfaces when the valenced families score near zero. ---
-  { name: 'content', sign: 0, propensity: (cx) => 1 + 0.5 * cx.agreeableness + 0.4 * cx.extraversion },
-  { name: 'reserved', sign: 0, propensity: (cx) => 1 - 0.7 * cx.extraversion },
-  { name: 'calm', sign: 0, propensity: () => 1 },
-]);
+// Built from base_vanilla.json's declarative { name, sign, base, coeffs }
+// records — JSON can't hold a closure, so the propensity function is
+// reconstructed here at load time from each entry's base + per-axis
+// coefficients. Everything downstream (emo.sign, emo.propensity(cx)) is
+// unchanged from when propensity was authored as a literal closure.
+const EMOTIONS = getSchema().emotion.emotions.map((e) => ({
+  name: e.name,
+  sign: e.sign,
+  propensity: (cx) => e.base + Object.entries(e.coeffs)
+    .reduce((sum, [axis, weight]) => sum + weight * cx[axis], 0),
+}));
 
 // Baseline score the neutral family is measured against, so a no-memory NPC
 // still gets a personality-shaped read instead of nothing.
-const NEUTRAL_BASE = 0.6;
+const NEUTRAL_BASE = getSchema().emotion.neutralBase;
 
 function bandFor(magnitude) {
   return INTENSITY_BANDS.find((b) => magnitude <= b.max).band;
@@ -107,7 +95,7 @@ function deriveNetValence(recentMemories, log) {
     const entry = log[mem?.seq];
     const valence = entry ? MEMORY_VALENCE[entry.type] : undefined;
     if (typeof valence !== 'number') continue; // not a valenced memory — skip, don't advance decay
-    net += valence * (1 / (k * k));
+    net += valence * (1 / Math.pow(k, DECAY_EXPONENT));
     k += 1;
   }
   return net;
@@ -142,7 +130,7 @@ export function deriveEmotion(entity, recentMemories = [], log = []) {
 
   // Extraversion scales how loudly any feeling is expressed: +/-30% around
   // neutral. Applied uniformly so it changes intensity, never which emotion.
-  const expressiveness = 1 + 0.3 * cx.extraversion;
+  const expressiveness = 1 + getSchema().emotion.expressivenessCoefficient * cx.extraversion;
 
   const scored = [];
   for (const emo of EMOTIONS) {

@@ -6,13 +6,11 @@
 // them) by a fixed amount per action type. Never reads a numeric value from
 // the AI layer — deltas are raw, hand-authored constants.
 
+import { getSchema } from './activeSchema.js';
+
 // Provisional first-pass balance numbers, not final — easy to retune here
 // later without touching anything else.
-const ACTION_DELTAS = {
-  PLAYER_HELPED: { affection: 5, comfort: 3, trust: 5, desire: 0, obedience: -1 },
-  PLAYER_ROBBED: { affection: -15, comfort: -10, trust: -20, desire: 0, obedience: -5 },
-  PLAYER_IGNORED: { affection: -1, comfort: -1, trust: 0, desire: 0, obedience: 0 },
-};
+const ACTION_DELTAS = getSchema().relationships.actionDeltas;
 
 export function createRelationshipEffectEngine(world, relationships) {
   function applyDelta(entry) {
