@@ -26,7 +26,22 @@ import { createLocationCache } from './locationCache.js';
 import { createApp } from './ui/app-state.js';
 
 export function createShell(mountPoint, persistence = createPersistence()) {
-  const state = { phase: 'menu', theme: DEFAULT_THEME };
+  // persistence.js is now IndexedDB-backed and every method returns a
+  // Promise. The screens (mainMenu/creation/worldConfigEditor) read saves and
+  // presets SYNCHRONOUSLY mid-render, so rather than threading async/loading
+  // states through each of them, the shell — already the sole owner of
+  // `persistence` and already using setState()+re-render for every phase
+  // transition — hydrates small caches here and re-renders when they land.
+  // Reads (hasSaves/listPresets/getPreset) stay synchronous, served from the
+  // cache; writes (writeSave/savePreset/deletePreset) genuinely await the
+  // persistence call and then refresh the relevant cache.
+  const state = {
+    phase: 'menu', theme: DEFAULT_THEME,
+    savesCache: [], presetsCache: [], presetConfigsCache: {},
+    // Optimistic default: assume persistent until a hydration cycle proves
+    // otherwise, so we don't flash a false "storage unavailable" warning.
+    persistentCache: true,
+  };
   // The live run currently mounted (null in pre-play phases). Held so a return
   // to the menu can stop the tick and detach the window listeners.
   let running = null;
@@ -40,15 +55,26 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     renderPhase();
   }
 
+  async function refreshSaves() {
+    const [saves, persistent] = await Promise.all([persistence.listSaves(), persistence.isPersistent()]);
+    setState({ savesCache: saves, persistentCache: persistent });
+  }
+  async function refreshPresets() {
+    const list = await persistence.listPresets();
+    const configs = {};
+    await Promise.all(list.map(async (p) => { configs[p.name] = await persistence.getPreset(p.name); }));
+    setState({ presetsCache: list, presetConfigsCache: configs });
+  }
+
   const shell = {
     state,
     setState,
-    hasSaves: () => persistence.listSaves().length > 0,
+    hasSaves: () => state.savesCache.length > 0,
     // New Game opens the Character Creation wizard; the wizard's Finish calls
     // newGame(config) with the assembled run config (preset + seed + options +
     // playerCharacter). The WorldConfig editor's "start from preset" also calls
     // newGame(config) directly, skipping creation.
-    startCreation: () => { state.creation = initCreation(shell); setState({ phase: 'creation' }); },
+    startCreation: () => { state.creation = initCreation(shell); setState({ phase: 'creation' }); refreshPresets(); },
     // A fresh run. An isekai run (config.startTier, set by the wizard) pauses on
     // the landing beat before play; anything else drops straight in.
     newGame: (config) => {
@@ -57,21 +83,21 @@ export function createShell(mountPoint, persistence = createPersistence()) {
       else enterPlay(game);
     },
     enterPlayFromLanding: () => { const g = pendingGame; pendingGame = null; enterPlay(g, { walkthrough: true }); },
-    continueGame: () => setState({ phase: 'continue' }),
+    continueGame: () => { setState({ phase: 'continue' }); refreshSaves(); },
     openWorldConfig: () => {
       if (!state.editor) state.editor = { presetName: '', draft: structuredClone(WORLD_CONFIG) };
       setState({ phase: 'worldConfig' });
+      refreshPresets();
     },
     backToMenu: () => { teardown(); setState({ phase: 'menu' }); },
-    loadSave: (name) => {
-      const save = persistence.loadSave(name);
-      if (save) enterPlay(buildLiveGame({ save }));
-    },
-    // Preset library, delegated to persistence for the editor.
-    listPresets: () => persistence.listPresets(),
-    getPreset: (name) => persistence.getPreset(name),
-    savePreset: (name, config) => persistence.savePreset(name, config),
-    deletePreset: (name) => persistence.deletePreset(name),
+    loadSave: (name) => persistence.loadSave(name).then((save) => { if (save) enterPlay(buildLiveGame({ save })); }),
+    // Preset library, delegated to persistence for the editor. list/get read
+    // the cache (synchronous, for mid-render callers); save/delete await the
+    // real write, then refresh the cache and re-render.
+    listPresets: () => state.presetsCache,
+    getPreset: (name) => state.presetConfigsCache[name] ?? null,
+    savePreset: (name, config) => persistence.savePreset(name, config).then(refreshPresets),
+    deletePreset: (name) => persistence.deletePreset(name).then(refreshPresets),
   };
 
   // renderPhase — draw the current PRE-PLAY phase. Never runs during 'play'
@@ -92,7 +118,7 @@ export function createShell(mountPoint, persistence = createPersistence()) {
   // Continue — the saved-run list. Each row loads or deletes a slot. An empty
   // list still renders (with a note) so the phase is never a dead end.
   function renderContinue() {
-    const saves = persistence.listSaves();
+    const saves = state.savesCache;
     const rows = saves.map((s) => {
       const meta = s.meta || {};
       const when = s.savedAt ? new Date(s.savedAt).toLocaleString() : '';
@@ -106,7 +132,7 @@ export function createShell(mountPoint, persistence = createPersistence()) {
         children: [
           label,
           button('Load', primaryActionButtonStyle(), () => shell.loadSave(s.name)),
-          button('Delete', secondaryActionButtonStyle(), () => { persistence.deleteSave(s.name); renderPhase(); }),
+          button('Delete', secondaryActionButtonStyle(), () => { persistence.deleteSave(s.name).then(refreshSaves); }),
         ],
       });
     });
@@ -115,7 +141,7 @@ export function createShell(mountPoint, persistence = createPersistence()) {
       ? div('display:flex; flex-direction:column; gap:8px; width:100%;', { children: rows })
       : div(`font:400 12px ${FONT_BODY}; color:var(--text-faint); text-align:center; padding:8px 0;`, { text: 'No saved games yet.' });
 
-    const persistNote = persistence.isPersistent()
+    const persistNote = state.persistentCache
       ? null
       : div(`font:400 10px ${FONT_BODY}; color:var(--danger); text-align:center; margin-top:6px;`, {
           text: 'Storage unavailable here — saves will not survive a reload.',
@@ -146,18 +172,21 @@ export function createShell(mountPoint, persistence = createPersistence()) {
     clearEl(mountPoint);
 
     game.ctx.session = {
-      isPersistent: () => persistence.isPersistent(),
+      isPersistent: () => state.persistentCache,
       // Save to a stable per-run slot (world + player), overwriting in place.
-      save: () => {
+      // Async — awaits the write landing before returning the save name, so
+      // the debug menu's "Saved: <name>" note never claims success early.
+      save: async () => {
         const p = game.ctx.player;
         const d = game.ctx.engines.clock.getCurrentDate();
         const playerName = `${p.identity.firstName} ${p.identity.lastName}`.trim();
         const name = `${game.config.worldName} — ${playerName}`.trim();
-        persistence.writeSave(name, game.world, {
+        await persistence.writeSave(name, game.world, {
           worldName: game.config.worldName,
           player: playerName,
           dateText: `${d.monthName} Wk${d.week} Day ${d.day}`,
         });
+        refreshSaves();
         return name;
       },
       quitToMenu: () => shell.backToMenu(),
@@ -199,5 +228,9 @@ export function createShell(mountPoint, persistence = createPersistence()) {
   }
 
   renderPhase();
+  // Kick off the saves/persistent-status hydration immediately so the Main
+  // Menu's Continue button reflects reality shortly after boot, without
+  // making construction itself async.
+  refreshSaves();
   return shell;
 }
