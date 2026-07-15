@@ -45,16 +45,29 @@ const QUEST_ACCEPTED = 'QUEST_ACCEPTED';
 const QUEST_COMPLETED = 'QUEST_COMPLETED';
 const QUEST_FAILED = 'QUEST_FAILED';
 
-// The ordinary tier ladder in ascending order, straight from the store's own
-// thresholds. The divergence tiers ('complicated', 'resentful') are absent on
-// purpose: they never satisfy a reachRelationshipTier objective — a warm-but-
-// untrusted edge is not "friend".
-const TIER_LADDER = TIER_THRESHOLDS.map((t) => t.label);
+// Tier rank comes from each label's OWN threshold value (t.max), never its
+// position in the array. tierThresholds is schema-moddable (mergeSchemas
+// wholesale-replaces arrays on a mod patch — see engines/schemaMerge.js), so
+// a mod can reorder it; deriving rank from array position (the old
+// TIER_LADDER.indexOf approach) would then silently misjudge "at least tier
+// X" even though every individual label lookup still resolved correctly.
+// The divergence tiers ('complicated', 'resentful') are absent from
+// tierThresholds on purpose: they never satisfy a reachRelationshipTier
+// objective — a warm-but-untrusted edge is not "friend" — and tierRank
+// returning null for them preserves that.
+export function tierRank(thresholds, label) {
+  const entry = thresholds.find((t) => t.label === label);
+  return entry ? entry.max : null;
+}
+
+export function tierMeetsFor(thresholds, currentTier, requiredTier) {
+  const current = tierRank(thresholds, currentTier);
+  const required = tierRank(thresholds, requiredTier);
+  return current !== null && required !== null && current >= required;
+}
 
 function tierMeets(currentTier, requiredTier) {
-  const current = TIER_LADDER.indexOf(currentTier);
-  const required = TIER_LADDER.indexOf(requiredTier);
-  return current >= 0 && required >= 0 && current >= required;
+  return tierMeetsFor(TIER_THRESHOLDS, currentTier, requiredTier);
 }
 
 function emptyStatus() {
