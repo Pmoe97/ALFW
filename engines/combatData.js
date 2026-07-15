@@ -10,6 +10,8 @@
 // This is deliberately a MINIMAL proof-of-mechanism roster (four archetypes,
 // four templates), not a bestiary — content expansion is future scope.
 
+import { getSchema } from './activeSchema.js';
+
 function deepFreeze(value) {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -32,7 +34,7 @@ export const COMBAT_SALT_STRIDE = 256;
 // Hard cap on enemies per encounter. Encounter rolls draw a FIXED number of
 // values per slot up to this cap regardless of the template's actual size, so
 // the stream position never depends on which template was resolved.
-export const MAX_ENEMIES = 4;
+export const MAX_ENEMIES = getSchema().combat.maxEnemiesPerEncounter;
 
 // Enemy archetypes — lightweight combatant stat blocks, NOT registry
 // entities: no identity/appearance/psychology, so they never enter presence

@@ -1,0 +1,96 @@
+{
+  "entitySchema": {
+    "effectiveSkillAttributeDivisor": 2
+  },
+  "combat": {
+    "maxHpToughnessMultiplier": 2,
+    "attackAttributeDivisor": 4,
+    "minDamage": 1,
+    "fleeChanceClamp": { "min": 0.05, "max": 0.95 },
+    "maxEnemiesPerEncounter": 5
+  },
+  "economy": {
+    "minPrice": 1
+  },
+  "relationships": {
+    "tierThresholds": [
+      { "max": -10, "label": "hostile" },
+      { "max": 10, "label": "stranger" },
+      { "max": 30, "label": "acquaintance" },
+      { "max": 60, "label": "friend" },
+      { "max": null, "label": "trusted" }
+    ],
+    "divergence": {
+      "complicated": { "affectionMin": 40, "trustMax": 0 },
+      "resentful": { "affectionMax": 0, "obedienceMin": 40 }
+    },
+    "actionDeltas": {
+      "PLAYER_HELPED": { "affection": 5, "comfort": 3, "trust": 5, "desire": 0, "obedience": -1 },
+      "PLAYER_ROBBED": { "affection": -15, "comfort": -10, "trust": -20, "desire": 0, "obedience": -5 },
+      "PLAYER_IGNORED": { "affection": -1, "comfort": -1, "trust": 0, "desire": 0, "obedience": 0 }
+    }
+  },
+  "emotion": {
+    "memoryValence": { "PLAYER_HELPED": 2, "PLAYER_ROBBED": -4, "PLAYER_IGNORED": -1 },
+    "recencyWindow": 5,
+    "decayExponent": 2,
+    "intensityBands": [
+      { "max": 1.0, "band": "mild" },
+      { "max": 2.5, "band": "moderate" },
+      { "max": null, "band": "strong" }
+    ],
+    "neutralBase": 0.6,
+    "expressivenessCoefficient": 0.3,
+    "emotions": [
+      { "name": "indignant", "sign": -1, "base": 1, "coeffs": { "dominance": 0.8, "conscientiousness": 0.6 } },
+      { "name": "angry", "sign": -1, "base": 1, "coeffs": { "dominance": 0.8, "agreeableness": -0.7 } },
+      { "name": "resentful", "sign": -1, "base": 1, "coeffs": { "agreeableness": -0.7, "conscientiousness": 0.4 } },
+      { "name": "hurt", "sign": -1, "base": 1, "coeffs": { "dominance": -0.8, "agreeableness": 0.6 } },
+      { "name": "wary", "sign": -1, "base": 1, "coeffs": { "dominance": -0.6, "openness": -0.4 } },
+      { "name": "fond", "sign": 1, "base": 1, "coeffs": { "agreeableness": 0.8 } },
+      { "name": "grateful", "sign": 1, "base": 1, "coeffs": { "agreeableness": 0.5, "dominance": -0.5 } },
+      { "name": "delighted", "sign": 1, "base": 1, "coeffs": { "openness": 0.6, "extraversion": 0.4 } },
+      { "name": "pleased", "sign": 1, "base": 1, "coeffs": {} },
+      { "name": "content", "sign": 0, "base": 1, "coeffs": { "agreeableness": 0.5, "extraversion": 0.4 } },
+      { "name": "reserved", "sign": 0, "base": 1, "coeffs": { "extraversion": -0.7 } },
+      { "name": "calm", "sign": 0, "base": 1, "coeffs": {} }
+    ]
+  },
+  "voice": {
+    "highThreshold": 7,
+    "lowThreshold": 3,
+    "maxDirectives": 3
+  },
+  "conversation": {
+    "recentExchangesWindow": 4
+  },
+  "npcGenerator": {
+    "personalityJitter": { "magnitude": 2, "min": 0, "max": 10 },
+    "attributeRoll": { "base": 8, "spread": 8 },
+    "primarySkillRoll": { "spread": 5 },
+    "secondarySkillRoll": { "spread": 3 },
+    "distinguishingFeatureCount": { "min": 0, "max": 2 },
+    "schedule": { "nocturnalShiftThreshold": 0.5, "tavernEveningThreshold": 0.5 },
+    "sexualOrientations": [
+      { "name": "heterosexual", "weight": 6 },
+      { "name": "bisexual", "weight": 2 },
+      { "name": "homosexual", "weight": 1 },
+      { "name": "asexual", "weight": 1 }
+    ]
+  },
+  "worldClock": {
+    "timeOfDayBuckets": { "morningStart": 5, "dayStart": 12, "eveningStart": 18, "nightStart": 22 }
+  },
+  "reputation": {
+    "weightPerQuality": 2
+  },
+  "weather": {
+    "defaultSeasonWeather": {
+      "Rain": { "rain": 4, "overcast": 3, "clear": 2, "storm": 1 },
+      "Sun": { "clear": 5, "warm": 3, "overcast": 1 },
+      "Harvest": { "clear": 3, "overcast": 3, "fog": 2, "rain": 2 },
+      "Snow": { "snow": 4, "overcast": 3, "clear": 2, "blizzard": 1 }
+    },
+    "genericWeather": { "clear": 3, "overcast": 2, "rain": 1 }
+  }
+}

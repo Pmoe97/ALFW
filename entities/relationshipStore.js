@@ -14,6 +14,8 @@
 // deriveRelationshipStats / rebuildRelationshipStats). fromCallsTo labels and
 // family ties are deliberately NOT log-derived — they stay direct-set.
 
+import { getSchema } from '../engines/activeSchema.js';
+
 /**
  * @typedef {Object} RelationshipStats
  * @property {number} affection
@@ -240,13 +242,10 @@ export function createRelationshipStore(world) {
 // only — not final game balance, adjust cutoffs here as needed. Used only as
 // the fallback ladder below the divergence checks in relationshipTier. Exported
 // so tests can assert the fallback against the exact same ladder it uses.
-export const TIER_THRESHOLDS = [
-  { max: -10, label: 'hostile' },
-  { max: 10, label: 'stranger' },
-  { max: 30, label: 'acquaintance' },
-  { max: 60, label: 'friend' },
-  { max: Infinity, label: 'trusted' },
-];
+// JSON can't hold Infinity, so base_vanilla.json's last band's max is `null`,
+// mapped back here.
+export const TIER_THRESHOLDS = getSchema().relationships.tierThresholds
+  .map((t) => ({ ...t, max: t.max ?? Infinity }));
 
 /**
  * Relationship tier is always derived from stats, never stored. Recompute it
@@ -262,11 +261,15 @@ export const TIER_THRESHOLDS = [
  */
 export function relationshipTier(stats) {
   const { affection, comfort, trust, desire, obedience } = stats;
+  const div = getSchema().relationships.divergence;
 
-  if (affection >= 40 && trust <= 0) return 'complicated'; // frenemy: warm but untrusted
-  if (affection <= 0 && obedience >= 40) return 'resentful'; // obeys without any warmth
+  if (affection >= div.complicated.affectionMin && trust <= div.complicated.trustMax) return 'complicated'; // frenemy: warm but untrusted
+  if (affection <= div.resentful.affectionMax && obedience >= div.resentful.obedienceMin) return 'resentful'; // obeys without any warmth
 
   // Fallback: the average-based ladder for ordinary, non-divergent relationships.
-  const average = (affection + comfort + trust + desire + obedience) / 5;
+  // Divided by RELATIONSHIP_AXES.length (not a standalone config number) so
+  // the average can never silently drift out of sync with the actual stat
+  // count if an axis is ever added or removed.
+  const average = (affection + comfort + trust + desire + obedience) / RELATIONSHIP_AXES.length;
   return TIER_THRESHOLDS.find((tier) => average <= tier.max).label;
 }

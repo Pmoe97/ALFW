@@ -7,6 +7,8 @@
 // only way to read a skill's effective value — the bonus is never written
 // back onto the entity.
 
+import { getSchema } from '../engines/activeSchema.js';
+
 /**
  * @typedef {Object} IntimateSet
  * @property {string} genitalType
@@ -203,7 +205,8 @@ export function effectiveSkill(entity, skillName) {
   const { skills, attributes } = entity.capabilities;
   if (skillName in skills.primary) {
     const attrName = PRIMARY_SKILL_ATTRIBUTE[skillName];
-    return skills.primary[skillName] + Math.floor(attributes[attrName] / 2);
+    const divisor = getSchema().entitySchema.effectiveSkillAttributeDivisor;
+    return skills.primary[skillName] + Math.floor(attributes[attrName] / divisor);
   }
   if (skillName in skills.secondary) {
     return skills.secondary[skillName];

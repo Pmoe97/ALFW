@@ -28,6 +28,7 @@ import { mulberry32 } from '../worldState.js';
 import { hashCoords, mapSeed, tierRank } from './worldMapEngine.js';
 import { weightedPick, nodeKeys, hashString } from './poiEngine.js';
 import { effectiveSkill } from '../entities/entitySchema.js';
+import { getSchema } from './activeSchema.js';
 import {
   getItemDef, getRecipe, AUTHORED_SHOPS, SHOPPABLE_CATEGORIES, SHOP_POOLS, EQUIP_SLOTS,
 } from './economyData.js';
@@ -77,7 +78,7 @@ function readEconomy(config) {
 // not a rearchitecture.
 export function priceFor(config, itemDef, shopContext, direction) {
   const { spread } = readEconomy(config);
-  if (direction === 'shopSells') return Math.max(1, Math.round(itemDef.baseValue * spread.shopSellsFactor));
+  if (direction === 'shopSells') return Math.max(getSchema().economy.minPrice, Math.round(itemDef.baseValue * spread.shopSellsFactor));
   if (direction === 'shopBuys') return Math.floor(itemDef.baseValue * spread.shopBuysFactor);
   throw new Error(`priceFor: unknown direction "${direction}"`);
 }

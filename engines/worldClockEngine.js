@@ -24,6 +24,7 @@
 // object. No state, no game logic.
 
 import { log } from '../debugLog.js';
+import { getSchema } from './activeSchema.js';
 
 const SECONDS_PER_HOUR = 3600;
 const SECONDS_PER_MINUTE = 60;
@@ -151,10 +152,11 @@ export function deriveTimeOfDayBucket(hour) {
   if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
     throw new Error(`deriveTimeOfDayBucket: hour must be an integer 0-23, got ${hour}`);
   }
-  if (hour >= 5 && hour < 12) return 'morning'; // 05-11
-  if (hour >= 12 && hour < 18) return 'day';    // 12-17
-  if (hour >= 18 && hour < 22) return 'evening'; // 18-21
-  return 'night';                                // 22-23, 00-04
+  const b = getSchema().worldClock.timeOfDayBuckets;
+  if (hour >= b.morningStart && hour < b.dayStart) return 'morning';
+  if (hour >= b.dayStart && hour < b.eveningStart) return 'day';
+  if (hour >= b.eveningStart && hour < b.nightStart) return 'evening';
+  return 'night';
 }
 
 // createWorldClockEngine — the engine. Same contract as the other engines: a

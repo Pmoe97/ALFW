@@ -16,18 +16,14 @@
 import { mulberry32 } from '../worldState.js';
 import { hashCoords, mapSeed } from './worldMapEngine.js';
 import { weightedPick } from './poiEngine.js';
+import { getSchema } from './activeSchema.js';
 
 // Disjoint salt band, kept clear of terrain (11/29/…), POI (60000/80000),
 // NPC (100000), and travel-incident (120000) per worldMapEngine's ledger.
 const WEATHER_SALT = 140000;
 
-const DEFAULT_SEASON_WEATHER = Object.freeze({
-  Rain: { rain: 4, overcast: 3, clear: 2, storm: 1 },
-  Sun: { clear: 5, warm: 3, overcast: 1 },
-  Harvest: { clear: 3, overcast: 3, fog: 2, rain: 2 },
-  Snow: { snow: 4, overcast: 3, clear: 2, blizzard: 1 },
-});
-const GENERIC_WEATHER = Object.freeze({ clear: 3, overcast: 2, rain: 1 });
+const DEFAULT_SEASON_WEATHER = getSchema().weather.defaultSeasonWeather;
+const GENERIC_WEATHER = getSchema().weather.genericWeather;
 
 // weatherTableFor — the { type: weight } table for a season: the world's
 // authored table when present and non-empty, else a built-in default.
