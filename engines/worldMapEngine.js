@@ -618,7 +618,7 @@ export function deriveNodeAt(config, x, y, ctx) {
 const ORIGIN_SEARCH_STEP = 1;
 const ORIGIN_SEARCH_ANGLES = 12;
 const ORIGIN_SEARCH_MAX_RADIUS = 10000;
-function findPassableOrigin(config) {
+export function findPassableOrigin(config) {
   if (deriveTerrainAt(config, 0, 0).passable) return { x: 0, y: 0 };
   for (
     let radius = ORIGIN_SEARCH_STEP;
@@ -637,23 +637,12 @@ function findPassableOrigin(config) {
   return { x: 0, y: 0 };
 }
 
-// findSettlementAdjacentOrigin — the isekai-landing placement. PURE in
-// (config, tierCap). Finds the nearest ACCEPTED settlement to the world origin
-// whose tier is at most `tierCap` (a "small settlement" — hamlet/village), then
-// returns a passable WILDERNESS coordinate a short hop outside it (beyond
-// snapRadius, within ~one inter-node distance) so the player wakes JUST OUTSIDE
-// the settlement rather than inside it. Falls back to findPassableOrigin when no
-// small settlement is reachable. Returns { x, y, settlement } (settlement = the
-// nearby site, for the landing narration). Gated behind config.startTier so the
-// default world's origin — and proof.js — are unchanged.
+// nearestAcceptedSettlementWithinCap — one ring-bounded scan (the isekai
+// landing search) for the nearest ACCEPTED settlement to the world origin
+// whose tier is at most `capRank`. Factored out so findSettlementAdjacentOrigin
+// can retry the identical search at successively relaxed caps.
 const LANDING_SEARCH_RINGS = 80;
-const LANDING_PLACE_ANGLES = 16;
-function findSettlementAdjacentOrigin(config, tierCap) {
-  const ctx = makeClassCtx();
-  const s = readClassification(config).settlement;
-  const capRank = tierRank(tierCap) < 0 ? tierRank('village') : tierRank(tierCap);
-
-  // Nearest accepted small settlement to (0,0), scanning cell rings outward.
+function nearestAcceptedSettlementWithinCap(config, ctx, s, capRank) {
   let best = null;
   let bestDist = Infinity;
   for (let ring = 0; ring <= LANDING_SEARCH_RINGS; ring++) {
@@ -668,6 +657,33 @@ function findSettlementAdjacentOrigin(config, tierCap) {
     }
     // Found one and the next ring cannot hold anything closer — stop.
     if (best && ring * s.cellSize > bestDist + s.cellSize) break;
+  }
+  return best;
+}
+
+// findSettlementAdjacentOrigin — the isekai-landing placement. PURE in
+// (config, tierCap). Finds the nearest ACCEPTED settlement to the world origin
+// no bigger than `tierCap`, ideally — if nothing at that tier is reachable
+// within LANDING_SEARCH_RINGS, the cap relaxes upward through SETTLEMENT_TIERS
+// (hamlet -> village -> town -> city -> capital) and retries, since a bigger
+// settlement nearby is a better landing than an empty one. Only when NO
+// settlement of any tier is reachable does it fall back to findPassableOrigin
+// with a wilderness-only origin. The chosen site's coordinate is then used to
+// place a passable WILDERNESS coordinate a short hop outside it (beyond
+// snapRadius, within ~one inter-node distance) so the player wakes JUST OUTSIDE
+// the settlement rather than inside it. Returns { x, y, settlement }
+// (settlement = the nearby site, for the landing narration, or null when
+// genuinely settlement-free). Gated behind config.startTier so the default
+// world's origin — and proof.js — are unchanged.
+const LANDING_PLACE_ANGLES = 16;
+export function findSettlementAdjacentOrigin(config, tierCap) {
+  const ctx = makeClassCtx();
+  const s = readClassification(config).settlement;
+  const startRank = tierRank(tierCap) < 0 ? tierRank('village') : tierRank(tierCap);
+
+  let best = null;
+  for (let rank = startRank; rank < SETTLEMENT_TIERS.length && !best; rank++) {
+    best = nearestAcceptedSettlementWithinCap(config, ctx, s, rank);
   }
   if (!best) return { ...findPassableOrigin(config), settlement: null };
 
