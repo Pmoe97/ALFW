@@ -143,6 +143,8 @@ import {
   getEncounterTemplate,
 } from './engines/combatData.js';
 import { INVENTORY_CATEGORIES, CRAFT_STATIONS, buildCombat } from './game/ui/model.js';
+import { CUSTOM_VALUE, resolvePresetOrCustom, defaultIntimateEntry, assembleIntimateEntries } from './game/ui/creationModel.js';
+import { buildPortraitPrompt } from './ai/buildPortraitPrompt.js';
 import { log, setChannelEnabled, isChannelEnabled } from './debugLog.js';
 
 const CONFIG_PATH = new URL('./worldConfig.json', import.meta.url);
@@ -227,7 +229,7 @@ const mira = createNpc({
     skin: { tone: 'olive', texture: 'weathered, faint laugh lines' },
     body: { shape: 'hourglass', chest: 'full', butt: 'round', legs: 'muscular' },
     distinguishingFeatures: ['a thin scar above her left eyebrow', 'ink-stained fingertips from keeping the ledger'],
-    intimate: [{ genitalType: 'vulva', shapeSize: 'average', extraDetails: 'a small birthmark on her inner thigh' }],
+    intimate: [{ type: 'vulva', size: 'average', details: 'a small birthmark on her inner thigh' }],
   },
   psychology: {
     personalityTraits: ['warm', 'shrewd', 'quick-tempered when crossed'],
@@ -297,7 +299,7 @@ const rowan = createPlayer({
     skin: { tone: 'fair, sun-weathered', texture: 'calloused hands' },
     body: { shape: 'athletic', chest: 'lean', butt: 'flat', legs: 'long' },
     distinguishingFeatures: ['a burn scar on his left forearm', 'a chipped front tooth'],
-    intimate: [{ genitalType: 'penis', shapeSize: 'average', extraDetails: 'circumcised' }],
+    intimate: [{ type: 'penis', size: 'average', details: 'circumcised' }],
   },
   psychology: {
     personalityTraits: ['curious', 'guarded', 'dryly humorous'],
@@ -5704,6 +5706,122 @@ console.log('\n=== Section SC: schemaCompiler (ordered mod-patch stacking) ===')
 }
 
 console.log("\nSection SC PASSED: compileSchema folds an ordered mod-patch stack onto a base schema, validating each patch against cumulative compiled state (not just original base) so later mods can build on earlier ones' new keys; an invalid mod is skipped with its real validation errors rather than crashing the stack, letting subsequent valid mods still apply; the function never mutates its inputs; and activeSchema.js's wiring is a true no-op today given the empty default ACTIVE_MODS");
+
+// Covers every deterministic/synthetic check above: prompt-assembly
+// determinism, the five queue-manager correctness properties, the stubbed
+// transport plumbing, fallback + contract enforcement, memory fan-out, the
+// permanent-voice / transient-emotion derivations, NPC schedules with
+// presence-aware witnesses, pair-keyed conversation history, the
+// travel/explore verbs with their seeded incident system, the inventory &
+// economy engine (seeded shop stock, atomic trade/craft, equipment), and the
+// full save/load round-trip of the entire world state.
+console.log('\n=== Section ID: intimate-details itemized-list assembly ===');
+
+{
+  // ID1: adding multiple entries — order and count preserved, presets pass through verbatim.
+  const draft = [defaultIntimateEntry('female'), defaultIntimateEntry('male')];
+  draft[1].size = 'generous';
+  const out = assembleIntimateEntries(draft);
+  assert.equal(out.length, 2, 'ID1: two draft entries assemble to two final entries');
+  assert.deepEqual(out[0], { type: 'vulva', size: 'average', details: '' }, 'ID1: female default entry resolves to preset vulva/average');
+  assert.deepEqual(out[1], { type: 'penis', size: 'generous', details: '' }, 'ID1: second entry keeps its own edited size independent of the first');
+  console.log('ID1 PASSED: multiple entries assemble in order with independent field values');
+}
+
+{
+  // ID2: removing one entry via splice — the remaining entries assemble correctly, none dropped/reordered incorrectly.
+  const draft = [defaultIntimateEntry('female'), defaultIntimateEntry('male'), defaultIntimateEntry('female')];
+  draft.splice(1, 1); // remove the middle (male) entry
+  const out = assembleIntimateEntries(draft);
+  assert.equal(out.length, 2, 'ID2: removing one of three entries leaves two');
+  assert.ok(out.every((e) => e.type === 'vulva'), 'ID2: the remaining two entries are the two untouched female-default entries');
+  console.log('ID2 PASSED: removing an entry leaves the remaining entries assembled correctly');
+}
+
+{
+  // ID3: choosing "custom" for type/size carries the free-text value through —
+  // never the literal CUSTOM_VALUE sentinel and never a preset label.
+  const entry = { type: CUSTOM_VALUE, typeCustom: '  tentacle sheath  ', size: CUSTOM_VALUE, sizeCustom: 'colossal', details: 'glows faintly in low light' };
+  const [out] = assembleIntimateEntries([entry]);
+  assert.equal(out.type, 'tentacle sheath', 'ID3: custom type carries through trimmed, not the sentinel');
+  assert.equal(out.size, 'colossal', 'ID3: custom size carries through, not the sentinel');
+  assert.notEqual(out.type, CUSTOM_VALUE, 'ID3: assembled type must never be the raw sentinel');
+  assert.equal(resolvePresetOrCustom('petite', 'ignored text'), 'petite', 'ID3: a real preset selection ignores any stray customText');
+  console.log('ID3 PASSED: custom-selected type/size carry the free-text value through, presets pass through untouched by stray custom text');
+}
+
+console.log('Section ID PASSED: itemized intimate-details list adds, removes, and resolves preset-or-custom entries correctly');
+
+console.log('\n=== Section PP: portrait prompt compiler ===');
+
+{
+  // PP1: representative appearance (Mira's fixture, renamed shape) — the prompt
+  // must carry each visual fragment and the professional-portrait framing.
+  const identity = { age: 34, gender: 'female', race: 'Human' };
+  const appearance = {
+    heightBuild: 'average height, sturdy build from years of hauling kegs',
+    hair: { color: 'auburn', style: 'braided', length: 'shoulder-length', texture: 'wavy' },
+    eyes: { color: 'hazel', shape: 'almond' },
+    face: { shape: 'oval', nose: 'straight', lips: 'full', jawline: 'soft', facialHair: 'none' },
+    skin: { tone: 'olive', texture: 'weathered, faint laugh lines' },
+    body: { shape: 'hourglass', chest: 'full', butt: 'round', legs: 'muscular' },
+    distinguishingFeatures: ['a thin scar above her left eyebrow', 'ink-stained fingertips from keeping the ledger'],
+    intimate: [{ type: 'vulva', size: 'average', details: 'a small birthmark on her inner thigh' }],
+  };
+  const prompt = buildPortraitPrompt(identity, appearance);
+  assert.ok(prompt.includes('Professional studio portrait photograph'), 'PP1: prompt carries the professional-portrait framing');
+  assert.ok(prompt.includes('auburn'), 'PP1: hair color present');
+  assert.ok(prompt.includes('hazel'), 'PP1: eye color present');
+  assert.ok(prompt.includes('a thin scar above her left eyebrow'), 'PP1: distinguishing feature present verbatim');
+  assert.ok(prompt.includes('vulva') && prompt.includes('a small birthmark on her inner thigh'), 'PP1: intimate entry (new type/size/details shape) folded into the prompt');
+  assert.ok(!prompt.includes('none'), 'PP1: a facialHair of "none" must not leak into the prompt as if it were a real feature');
+  console.log('PP1 PASSED: representative appearance compiles into a prompt carrying every populated fragment plus the portrait framing');
+}
+
+{
+  // PP2: sparse appearance (empty distinguishingFeatures/intimate, minimal fields)
+  // — the compiler must skip absent sections gracefully, not emit empty labels.
+  const identity = { age: 27, gender: 'male', race: 'Human' };
+  const appearance = {
+    heightBuild: 'tall, lean build',
+    hair: { color: '', style: '', length: '', texture: '' },
+    eyes: { color: 'grey', shape: '' },
+    face: { shape: '', nose: '', lips: '', jawline: '', facialHair: 'none' },
+    skin: { tone: '', texture: '' },
+    body: { shape: '', chest: '', butt: '', legs: '' },
+    distinguishingFeatures: [],
+    intimate: [],
+  };
+  const prompt = buildPortraitPrompt(identity, appearance);
+  assert.ok(!prompt.includes('distinguishing features:'), 'PP2: an empty distinguishingFeatures list omits the section entirely');
+  assert.ok(!prompt.includes('intimate detail:'), 'PP2: an empty intimate list omits the section entirely');
+  assert.ok(prompt.includes('grey'), 'PP2: still includes the one populated field (eye color)');
+  console.log('PP2 PASSED: sparse/empty appearance fields are skipped gracefully, populated fields still render');
+}
+
+{
+  // PP3: race-extension fields (arbitrary top-level string keys beyond the
+  // known Appearance shape, e.g. dragonkin's scaleColor) are folded in too.
+  const identity = { age: 40, gender: 'female', race: 'Dragonkin' };
+  const appearance = {
+    heightBuild: '', hair: {}, eyes: {}, face: {}, skin: {}, body: {},
+    distinguishingFeatures: [], intimate: [],
+    scaleColor: 'emerald',
+  };
+  const prompt = buildPortraitPrompt(identity, appearance);
+  assert.ok(prompt.includes('emerald'), 'PP3: an unrecognized race-extension field is folded into the prompt');
+  console.log('PP3 PASSED: race-extension appearance fields (outside the base Appearance shape) are included');
+}
+
+{
+  // PP4: determinism — identical inputs produce a byte-identical prompt.
+  const identity = { age: 34, gender: 'female', race: 'Human' };
+  const appearance = { heightBuild: 'tall', hair: { color: 'black' }, eyes: {}, face: {}, skin: {}, body: {}, distinguishingFeatures: [], intimate: [] };
+  assert.equal(buildPortraitPrompt(identity, appearance), buildPortraitPrompt(identity, appearance), 'PP4: compiler is pure — identical inputs yield a byte-identical prompt');
+  console.log('PP4 PASSED: compiler is deterministic');
+}
+
+console.log('Section PP PASSED: buildPortraitPrompt compiles structured appearance data into a deterministic portrait prompt, folding in the itemized intimate list and race extensions, and skips empty sections gracefully');
 
 // Covers every deterministic/synthetic check above: prompt-assembly
 // determinism, the five queue-manager correctness properties, the stubbed

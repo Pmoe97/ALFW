@@ -35,10 +35,14 @@ import { deriveRaceRegistry } from '../../../entities/raceRegistry.js';
 import { createPlayer, ATTRIBUTE_NAMES, PRIMARY_SKILL_ATTRIBUTE, SECONDARY_SKILLS } from '../../../entities/entitySchema.js';
 import { getSchemaDiff, resolveFieldList, resolveFieldValue } from '../../../entities/fieldSchema.js';
 import {
-  BASE_APPEARANCE_POOLS, APPEARANCE_FIELD_ORDER, INTIMATE_GENITAL_BY_GENDER, INTIMATE_SHAPE_SIZES,
+  BASE_APPEARANCE_POOLS, APPEARANCE_FIELD_ORDER, INTIMATE_TYPE_PRESETS, INTIMATE_SIZE_PRESETS,
   DISTINGUISHING_FEATURES, PERSONALITY_TRAITS,
 } from '../../../engines/npcGeneratorEngine.js';
 import { deriveVoiceDirectives } from '../../../entities/voice.js';
+import { presetOrCustomField, itemListField } from '../fieldControls.js';
+import { defaultIntimateEntry, assembleIntimateEntries } from '../creationModel.js';
+import { buildPortraitPrompt } from '../../../ai/buildPortraitPrompt.js';
+import { generatePortraitImages } from '../../../ai/generatePortraitImages.js';
 
 const STEPS = ['World', 'Identity', 'Attributes', 'Appearance', 'Portrait'];
 const INPUT = 'background:var(--bg-soft); border:1px solid var(--border-strong); color:var(--text); border-radius:4px; padding:6px 8px; font:400 12px Inter,sans-serif; width:100%;';
@@ -80,21 +84,23 @@ export function initCreation(shell) {
   const race = races[0];
   const attributes = {};
   for (const a of ATTRIBUTE_NAMES) attributes[a] = POINT_BUY_BASE;
+  const gender = (race?.genders?.[0]) || 'female';
   return {
     step: 0,
     presetName: '',
     seed: Math.floor(Math.random() * 1e9),
     difficulty: '', season: '', startTier: 'village', contentReviewed: false,
-    race: race?.id, gender: (race?.genders?.[0]) || 'female',
+    race: race?.id, gender,
     firstName: '', lastName: '', age: race?.ageRange?.min ?? 25, vocation: 'wandering adventurer',
     statMode: 'pointbuy',
     attributes,
     rolledPool: null, rolledAssign: {},
     sandbox: Object.fromEntries(ATTRIBUTE_NAMES.map((a) => [a, 10])),
     appearance: {}, extensions: {},
-    intimate: { shapeSize: 'average', extraDetails: '' },
+    intimate: [defaultIntimateEntry(gender)],
     features: [],
     portrait: null,
+    portraitPrompt: null, portraitSampleCount: 1, portraitCandidates: [], portraitGenerating: false,
   };
 }
 
@@ -120,7 +126,7 @@ export function renderCreation(shell) {
   else if (c.step === 1) body = pageIdentity(shell, c, config, race, rerender);
   else if (c.step === 2) body = pageAttributes(shell, c, rerender);
   else if (c.step === 3) body = pageAppearance(shell, c, config, race, rerender);
-  else body = pagePortrait(shell, c, race, rerender);
+  else body = pagePortrait(shell, c, config, race, rerender);
 
   const canNext = validateStep(c, config, race);
   const nav = div('display:flex; justify-content:space-between; align-items:center; margin-top:16px;', {
@@ -293,9 +299,19 @@ function pageAppearance(shell, c, config, race, rerender) {
     return labeled(`${cap(f)} (${race.displayName})`, selectEl(pool.map((o) => ({ v: o, t: o })), c.extensions[f] ?? pool[0], (v) => { c.extensions[f] = v; }));
   });
 
-  const intimate = section('Intimate',
-    labeled('Build', selectEl(INTIMATE_SHAPE_SIZES.map((o) => ({ v: o, t: o })), c.intimate.shapeSize, (v) => { c.intimate.shapeSize = v; })),
-    labeled('Details (optional)', textInput(c.intimate.extraDetails, (v) => { c.intimate.extraDetails = v; })));
+  const intimate = section('Intimate details',
+    itemListField(
+      c.intimate,
+      (entry) => [
+        labeled('Type', presetOrCustomField(INTIMATE_TYPE_PRESETS, entry.type, entry.typeCustom,
+          (v) => { entry.type = v; rerender(); }, (v) => { entry.typeCustom = v; })),
+        labeled('Size', presetOrCustomField(INTIMATE_SIZE_PRESETS, entry.size, entry.sizeCustom,
+          (v) => { entry.size = v; rerender(); }, (v) => { entry.sizeCustom = v; })),
+        labeled('Details (optional)', textInput(entry.details, (v) => { entry.details = v; })),
+      ],
+      () => { c.intimate.push(defaultIntimateEntry(c.gender)); rerender(); },
+      (i) => { c.intimate.splice(i, 1); rerender(); },
+      'Add intimate detail'));
 
   const featureChips = div('display:flex; flex-wrap:wrap; gap:6px;', {
     children: DISTINGUISHING_FEATURES.map((f) =>
@@ -308,7 +324,6 @@ function pageAppearance(shell, c, config, race, rerender) {
   const randomize = button('Randomize appearance', smallAccentButtonStyle() + ' padding:8px 12px;', () => {
     for (const { path } of fields) c.appearance[path] = rand(poolFor(path, race, diff) || ['']);
     for (const f of extFields) c.extensions[f] = rand(race.appearanceExtensions[f]);
-    c.intimate.shapeSize = rand(INTIMATE_SHAPE_SIZES);
     c.features = Math.random() < 0.6 ? [rand(DISTINGUISHING_FEATURES)] : [];
     rerender();
   });
@@ -324,7 +339,14 @@ function pageAppearance(shell, c, config, race, rerender) {
 }
 
 // --- page 4: portrait -------------------------------------------------------
-function pagePortrait(shell, c, race, rerender) {
+function pagePortrait(shell, c, config, race, rerender) {
+  // Lazy one-shot compile: backfills c.portraitPrompt on first visit to this
+  // step, guarded so it never re-derives on subsequent renders (edits here
+  // are a one-way buffer — they never write back to the appearance fields).
+  if (c.portraitPrompt == null) {
+    c.portraitPrompt = buildPortraitPrompt({ age: c.age, gender: c.gender, race: race.displayName }, assembleAppearance(c, config, race));
+  }
+
   const preview = div('width:180px; height:180px; border-radius:8px; margin:0 auto; display:flex; align-items:center; justify-content:center; overflow:hidden; background:repeating-linear-gradient(45deg, var(--panel-alt), var(--panel-alt) 8px, var(--bg-soft) 8px, var(--bg-soft) 16px); border:1px solid var(--border);');
   if (c.portrait) {
     const img = el('img', 'width:100%; height:100%; object-fit:cover;', { attrs: { src: c.portrait } });
@@ -337,15 +359,51 @@ function pagePortrait(shell, c, race, rerender) {
     text: `${c.firstName || 'Unnamed'} ${c.lastName || ''} — ${cap(c.gender)} ${race.displayName}, ${c.age}. ${cap(c.vocation)}.`,
   });
 
+  const promptBox = labeled('Portrait prompt (editable)', textArea(c.portraitPrompt, (v) => { c.portraitPrompt = v; }, 6));
+
+  const resetBtn = button('Reset', secondaryActionButtonStyle(), () => {
+    // Always recompiles against CURRENT appearance-tab state, discarding manual edits.
+    c.portraitPrompt = buildPortraitPrompt({ age: c.age, gender: c.gender, race: race.displayName }, assembleAppearance(c, config, race));
+    rerender();
+  });
+
+  const sampleRow = labeled('Sample Number', selectEl(
+    [1, 2, 4].map((n) => ({ v: String(n), t: String(n) })),
+    String(c.portraitSampleCount),
+    (v) => { c.portraitSampleCount = Number(v); }));
+
+  const pluginReady = typeof generateImage === 'function';
   const genBtn = button(
-    typeof generateImage === 'function' ? 'Generate portrait' : 'Portrait generation (needs the AI image plugin)',
-    primaryActionButtonStyle() + (typeof generateImage === 'function' ? '' : ' opacity:0.5; pointer-events:none;'),
-    () => { /* wired to the shared image pipeline in the Freeplay/AI stage */ }
+    c.portraitGenerating ? 'Generating…' : (pluginReady ? 'Generate portraits' : 'Portrait generation (needs the AI image plugin)'),
+    primaryActionButtonStyle() + (pluginReady && !c.portraitGenerating ? '' : ' opacity:0.5; pointer-events:none;'),
+    async () => {
+      if (c.portraitGenerating || !pluginReady) return;
+      c.portraitGenerating = true; c.portraitCandidates = []; rerender();
+      const results = await generatePortraitImages(c.portraitPrompt, c.portraitSampleCount);
+      c.portraitCandidates = results.filter((r) => r.ok).map((r) => r.url);
+      c.portraitGenerating = false;
+      rerender();
+    }
   );
 
+  const candidateGrid = c.portraitCandidates.length > 0
+    ? div('display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:8px;', {
+        children: c.portraitCandidates.map((url) =>
+          el('img', `width:100%; aspect-ratio:1; object-fit:cover; border-radius:6px; cursor:pointer; border:2px solid ${url === c.portrait ? 'var(--accent)' : 'var(--border)'};`,
+            { attrs: { src: url }, onClick: () => { c.portrait = url; rerender(); } })),
+      })
+    : null;
+
   return div('display:flex; flex-direction:column; gap:14px;', {
-    children: [section('Your face in this world', preview, summary, div('display:flex; justify-content:center;', { children: [genBtn] }),
-      span(`font:400 10px ${FONT_BODY}; color:var(--text-faint); text-align:center;`, { text: 'You can begin now; a portrait can be generated here once the image pipeline is live.' }))],
+    children: [
+      section('Your face in this world', preview, summary),
+      section('Portrait prompt',
+        promptBox,
+        div('display:flex; gap:12px; align-items:flex-end; justify-content:space-between; flex-wrap:wrap;', { children: [sampleRow, resetBtn] }),
+        div('display:flex; justify-content:center;', { children: [genBtn] }),
+        candidateGrid,
+        span(`font:400 10px ${FONT_BODY}; color:var(--text-faint); text-align:center;`, { text: 'You can begin now; pick a favorite portrait here, or continue with none.' })),
+    ],
   });
 }
 
@@ -428,10 +486,7 @@ function assembleAppearance(c, config, race) {
     appearance[f] = c.extensions[f] ?? race.appearanceExtensions[f][0];
   }
   appearance.distinguishingFeatures = [...c.features];
-  appearance.intimate = [{
-    genitalType: INTIMATE_GENITAL_BY_GENDER[c.gender] ?? 'unspecified',
-    shapeSize: c.intimate.shapeSize, extraDetails: c.intimate.extraDetails || '',
-  }];
+  appearance.intimate = assembleIntimateEntries(c.intimate);
   return appearance;
 }
 
@@ -460,6 +515,12 @@ function textInput(value, onInput, extra = '') {
   i.value = value ?? '';
   i.addEventListener('input', (e) => onInput(e.target.value));
   return i;
+}
+function textArea(value, onInput, rows = 6) {
+  const t = el('textarea', INPUT + ` resize:vertical; min-height:${rows * 20}px;`, { attrs: { rows: String(rows) } });
+  t.value = value ?? '';
+  t.addEventListener('input', (e) => onInput(e.target.value));
+  return t;
 }
 function selectEl(options, value, onChange) {
   const s = el('select', INPUT);
