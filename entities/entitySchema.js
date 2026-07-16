@@ -10,10 +10,10 @@
 import { getSchema } from '../engines/activeSchema.js';
 
 /**
- * @typedef {Object} IntimateSet
- * @property {string} genitalType
- * @property {string} shapeSize
- * @property {string} extraDetails
+ * @typedef {Object} IntimateEntry
+ * @property {string} type
+ * @property {string} size
+ * @property {string} details
  */
 
 /**
@@ -73,7 +73,7 @@ import { getSchema } from '../engines/activeSchema.js';
  * @property {{tone: string, texture: string}} skin
  * @property {{shape: string, chest: string, butt: string, legs: string}} body
  * @property {string[]} distinguishingFeatures
- * @property {IntimateSet[]} intimate
+ * @property {IntimateEntry[]} intimate
  */
 
 /**

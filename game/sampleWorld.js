@@ -412,7 +412,7 @@ export function buildSampleWorld({ save, config } = {}) {
       skin: { tone: 'olive', texture: 'weathered, faint laugh lines' },
       body: { shape: 'hourglass', chest: 'full', butt: 'round', legs: 'muscular' },
       distinguishingFeatures: ['a thin scar above her left eyebrow', 'ink-stained fingertips from keeping the ledger'],
-      intimate: [{ genitalType: 'vulva', shapeSize: 'average', extraDetails: 'a small birthmark on her inner thigh' }],
+      intimate: [{ type: 'vulva', size: 'average', details: 'a small birthmark on her inner thigh' }],
     },
     psychology: {
       personalityTraits: ['warm', 'shrewd', 'quick-tempered when crossed'],
@@ -482,7 +482,7 @@ export function buildSampleWorld({ save, config } = {}) {
       skin: { tone: 'fair, sun-weathered', texture: 'calloused hands' },
       body: { shape: 'athletic', chest: 'lean', butt: 'flat', legs: 'long' },
       distinguishingFeatures: ['a burn scar on his left forearm', 'a chipped front tooth'],
-      intimate: [{ genitalType: 'penis', shapeSize: 'average', extraDetails: 'circumcised' }],
+      intimate: [{ type: 'penis', size: 'average', details: 'circumcised' }],
     },
     psychology: {
       personalityTraits: ['curious', 'guarded', 'dryly humorous'],
@@ -561,7 +561,7 @@ export function buildSampleWorld({ save, config } = {}) {
       skin: { tone: 'deep olive', texture: 'smooth, carefully kept' },
       body: { shape: 'lean', chest: 'small', butt: 'flat', legs: 'long' },
       distinguishingFeatures: ['ink stains on two fingers she never quite scrubs off', 'dresses noticeably better than her dockside upbringing would suggest'],
-      intimate: [{ genitalType: 'vulva', shapeSize: 'petite', extraDetails: 'a small tattoo of a pair of dice on her hip' }],
+      intimate: [{ type: 'vulva', size: 'petite', details: 'a small tattoo of a pair of dice on her hip' }],
     },
     psychology: {
       personalityTraits: ['sharp-tongued', 'quick with a joke', 'evasive about money', 'genuinely warm underneath it'],

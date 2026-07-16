@@ -180,8 +180,9 @@ const BASE_VOICE_ACCENTS = Object.freeze([
 ]);
 // speechPattern / voice-tag pools are gone: voice directives now derive from
 // personality axes (entities/voice.js), not from independent flavor rolls.
-export const INTIMATE_GENITAL_BY_GENDER = Object.freeze({ female: 'vulva', male: 'penis' });
-export const INTIMATE_SHAPE_SIZES = Object.freeze(['petite', 'average', 'generous']);
+export const INTIMATE_TYPE_BY_GENDER = Object.freeze({ female: 'vulva', male: 'penis' });
+export const INTIMATE_TYPE_PRESETS = Object.freeze(['vulva', 'penis', 'breasts', 'anus']);
+export const INTIMATE_SIZE_PRESETS = Object.freeze(['petite', 'average', 'generous']);
 
 // --- Draw helpers (all consume the one per-NPC rng stream) --------------------
 
@@ -312,9 +313,9 @@ export function deriveNpc(config, node, enabledRaces, i) {
   if (featureCount === 2) appearance.distinguishingFeatures = pickTwo(rng, DISTINGUISHING_FEATURES);
   appearance.intimate = [
     {
-      genitalType: INTIMATE_GENITAL_BY_GENDER[gender] ?? 'unspecified',
-      shapeSize: pick(rng, INTIMATE_SHAPE_SIZES),
-      extraDetails: '',
+      type: INTIMATE_TYPE_BY_GENDER[gender] ?? 'unspecified',
+      size: pick(rng, INTIMATE_SIZE_PRESETS),
+      details: '',
     },
   ];
 
