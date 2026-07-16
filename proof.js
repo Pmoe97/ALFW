@@ -4362,6 +4362,58 @@ function runSectionCB(record) {
     record(`CB9 PASSED: buildCombat's roundLog reconstructs every resolved round (not just the last) in ascending order, observed across ${roundsObserved} rounds`);
   }
 
+  // --- CB10: UI model round-log — the tutorial's brink-rescue dispatches a
+  // standalone ITEM_CONSUMED{reason:'tutorial_rescue'} outside any round's
+  // own actions (see game/tutorial.js), which used to heal the player with
+  // no line anywhere explaining it. buildRoundLog must fold that entry into
+  // the round block it immediately follows, without disturbing CB9's
+  // round-count/ordering invariants or colliding with a normal in-round
+  // item use (a different ITEM_CONSUMED reason).
+  {
+    const w = cbBuild();
+    cbGiveWeapon(w, 'iron_sword');
+    const started = w.combat.startCombat('tmpl_bandit_ambush', w.map.getOriginNode());
+    const combatId = started.payload.combatId;
+    const uiCtx = { engines: { combat: w.combat, economy: w.economy }, player: { id: w.rowanId }, world: w.world };
+
+    const en = cbFirstLiveEnemy(w.combat);
+    w.combat.act({ type: 'attackLethal', targetId: en.id });
+    const beforeRescue = buildCombat(uiCtx);
+    const roundsBefore = beforeRescue.roundLog.length;
+
+    w.world.dispatch('ITEM_CONSUMED', {
+      entityId: w.rowanId,
+      combatId,
+      stacks: {},
+      effect: { healed: 17, hpBefore: 3, hpAfter: 20 },
+      reason: 'tutorial_rescue',
+    });
+
+    const afterRescue = buildCombat(uiCtx);
+    assert.equal(afterRescue.roundLog.length, roundsBefore, 'the rescue is folded into the existing last round block, not a new block — round count is unchanged');
+    assert.deepEqual(afterRescue.roundLog.map((b) => b.round), beforeRescue.roundLog.map((b) => b.round), 'round numbering is untouched by folding in the rescue line');
+    const lastBlock = afterRescue.roundLog[afterRescue.roundLog.length - 1];
+    assert.ok(lastBlock.lines.some((l) => l.includes('steadied')), 'the round the rescue landed after gains a visible "steadied" line — the round-log panel can no longer hide this heal');
+    assert.equal(lastBlock.lines.filter((l) => l.includes('steadied')).length, 1, 'exactly one rescue line is added, not duplicated');
+
+    // A normal in-round item use carries reason: <combatId>, not
+    // 'tutorial_rescue' (see combatEngine.js's act()) — must NOT be picked
+    // up by the same branch.
+    const roundsWithRescue = afterRescue.roundLog.length;
+    w.world.dispatch('ITEM_CONSUMED', {
+      entityId: w.rowanId,
+      combatId,
+      stacks: {},
+      effect: { healed: 5, hpBefore: 10, hpAfter: 15 },
+      reason: combatId,
+    });
+    const afterNormalUse = buildCombat(uiCtx);
+    assert.equal(afterNormalUse.roundLog.length, roundsWithRescue, 'a normal-reason ITEM_CONSUMED (not tutorial_rescue) is not folded into the log at all — it is not a tutorial rescue');
+    assert.equal(afterNormalUse.roundLog[afterNormalUse.roundLog.length - 1].lines.filter((l) => l.includes('steadied')).length, 1, 'the normal-reason item use adds no additional "steadied" line — still exactly the one from the real rescue');
+
+    record("CB10 PASSED: buildRoundLog folds the tutorial brink-rescue ITEM_CONSUMED into the round it followed as a visible line, leaves CB9's round-count/ordering invariants untouched, and never mistakes a normal in-round item use for the rescue");
+  }
+
   return { log: cbBuild(forceIncident('bandit', 2)).world.getEventLog() };
 }
 
