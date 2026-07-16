@@ -619,6 +619,13 @@ function formatRoundActions(actions, nameOf) {
 // combat's combatId into { round, lines } blocks, in round order (log order).
 // Reads the raw log (the combat engine commits full action facts); the whole
 // scrollback, not just the last round.
+//
+// Also folds in the tutorial's brink-rescue (game/tutorial.js dispatches a
+// standalone ITEM_CONSUMED{reason:'tutorial_rescue'} outside any round's own
+// actions, so it would otherwise heal the player with no line ever
+// explaining it). It always lands strictly after the round that dropped the
+// player to the brink and before the next round's COMBAT_ROUND_RESOLVED, so
+// appending to the most-recently-pushed block always attaches it correctly.
 function buildRoundLog(ctx, active) {
   const log = ctx.world.getEventLog();
   const nameOf = (id) => active.combatants.find((c) => c.id === id)?.name ?? id;
@@ -626,6 +633,8 @@ function buildRoundLog(ctx, active) {
   for (const entry of log) {
     if (entry.type === 'COMBAT_ROUND_RESOLVED' && entry.payload.combatId === active.combatId) {
       blocks.push({ round: entry.payload.round, lines: formatRoundActions(entry.payload.actions, nameOf) });
+    } else if (entry.type === 'ITEM_CONSUMED' && entry.payload.combatId === active.combatId && entry.payload.reason === 'tutorial_rescue') {
+      blocks[blocks.length - 1].lines.push(`${nameOf(entry.payload.entityId)} is steadied by an unseen hand — healed to full (+${entry.payload.effect.healed} HP).`);
     }
   }
   return blocks;
