@@ -28,6 +28,11 @@
 // only reads small "save-meta" records (name/savedAt/meta), never the heavy
 // event-log data blob — loadSave(name) is the only thing that touches a
 // save's full data.
+//
+// A player who used the old localStorage version of this file has real data
+// sitting under the legacy alfw:presets:v1 / alfw:saves:v1 keys — see
+// migrateLegacyLocalStorage() below, which one-time imports it into the new
+// layout the first time a real (persistent) backend resolves.
 
 import { serializeWorld, parseSave } from './saveLoad.js';
 
@@ -39,6 +44,13 @@ const PRESET_PREFIX = 'preset:';
 const SAVE_META_PREFIX = 'save-meta:';
 const SAVE_DATA_PREFIX = 'save-data:';
 const PROBE_KEY = '__alfw_probe__';
+
+// Keys the PRE-IndexedDB version of this file used: one monolithic JSON blob
+// per collection (a map of name -> record), read-modify-written whole on
+// every mutation. Kept here only so migrateLegacyLocalStorage (below) can
+// find and import them; nothing else in this file reads or writes these.
+const LEGACY_PRESETS_KEY = 'alfw:presets:v1';
+const LEGACY_SAVES_KEY = 'alfw:saves:v1';
 
 // memoryBackend — an in-memory Map behind the same {getItem, setItem,
 // removeItem, listKeys} shape as indexedDbBackend, so createPersistence never
@@ -134,6 +146,62 @@ function pickBackend() {
   return indexedDbBackend();
 }
 
+// migrateLegacyLocalStorage — one-time import of data left behind by the
+// pre-IndexedDB version of this file. Only runs against a real, durable
+// backend (persistent === true) — importing into memoryBackend() would be
+// pointless (nothing survives a reload there) and would strand the legacy
+// data for no reason; leaving it alone in that case means a later
+// successful IndexedDB attempt can still pick it up.
+//
+// No separate "migration done" marker is needed: clearing each legacy key
+// on success IS the marker (a cleared key reads back null, so the next boot
+// finds nothing to import and does zero work). The two blobs are migrated
+// independently so a corrupt/failing one never blocks the other, and each
+// entry is only written if nothing already exists under its new key — a
+// save/preset made after this migration always wins over an older legacy
+// duplicate of the same name. If a blob's import throws partway through
+// (e.g. an IndexedDB write failure), its legacy key is left in place rather
+// than cleared, so the next boot retries — already-imported entries within
+// it are skipped again via the same never-clobber check, so nothing is
+// double-written or lost.
+async function migrateLegacyLocalStorage(b) {
+  if (b.persistent !== true) return;
+  const ls = globalThis.localStorage;
+  if (typeof ls === 'undefined') return;
+
+  const rawPresets = ls.getItem(LEGACY_PRESETS_KEY);
+  if (rawPresets) {
+    try {
+      const map = JSON.parse(rawPresets);
+      for (const [name, config] of Object.entries(map)) {
+        const key = PRESET_PREFIX + name;
+        if ((await b.getItem(key)) == null) await b.setItem(key, JSON.stringify(config));
+      }
+      ls.removeItem(LEGACY_PRESETS_KEY);
+    } catch {
+      // corrupt blob or a write failed partway — leave it for the next boot to retry
+    }
+  }
+
+  const rawSaves = ls.getItem(LEGACY_SAVES_KEY);
+  if (rawSaves) {
+    try {
+      const map = JSON.parse(rawSaves);
+      for (const [name, record] of Object.entries(map)) {
+        if (!record?.data) continue;
+        const metaKey = SAVE_META_PREFIX + name;
+        if ((await b.getItem(metaKey)) == null) {
+          await b.setItem(metaKey, JSON.stringify({ name, savedAt: record.savedAt, meta: record.meta ?? {} }));
+          await b.setItem(SAVE_DATA_PREFIX + name, record.data);
+        }
+      }
+      ls.removeItem(LEGACY_SAVES_KEY);
+    } catch {
+      // corrupt blob or a write failed partway — leave it for the next boot to retry
+    }
+  }
+}
+
 export function createPersistence(backendOrFactory = pickBackend) {
   let backend = null;
   let resolving = null;
@@ -153,6 +221,7 @@ export function createPersistence(backendOrFactory = pickBackend) {
         } catch {
           backend = memoryBackend();
         }
+        await migrateLegacyLocalStorage(backend);
         return backend;
       })();
     }
@@ -278,3 +347,10 @@ export function createPersistence(backendOrFactory = pickBackend) {
 //     backend instead of crashing: saves work for the session but the
 //     Continue screen shows the "Storage unavailable" note, and nothing
 //     appears in Application → IndexedDB.
+//  5. Legacy migration: in devtools → Application → Local Storage, hand-seed
+//     alfw:saves:v1 with a small JSON blob (e.g.
+//     {"Old Run":{"name":"Old Run","savedAt":"2024-01-01T00:00:00Z","meta":{},"data":"<a real serializeWorld() string>"}})
+//     and reload. Confirm the save appears on the Continue screen, that
+//     alfw:saves:v1 is gone from Local Storage afterward, and that
+//     Application → IndexedDB → alfw-persistence → kv now has the
+//     corresponding save-meta:/save-data: records.
