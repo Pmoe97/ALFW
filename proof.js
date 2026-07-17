@@ -5138,7 +5138,110 @@ console.log('\n=== Section PS: persistence.js (async storage adapter over memory
   console.log('PS3 PASSED: the per-instance write queue serializes overlapping writeSave calls — concurrent writes to different slots both land intact, and a same-slot race resolves to one complete write rather than a spliced mix');
 }
 
-console.log('\nSection PS PASSED: game/persistence.js\'s async storage-adapter layer (over memoryBackend, the same fallback the browser uses when IndexedDB is unavailable) round-trips a real world exactly, does not truncate a large event log, and serializes concurrent writes so an async race can never silently drop or splice a save — see the file\'s own header comment for the manual browser checklist covering the real indexedDbBackend() path');
+// PS4*: the one-time legacy localStorage -> IndexedDB migration. Migration
+// only runs against a real, durable backend (persistent === true), so these
+// force memoryBackend()'s persistent flag to simulate that without a real
+// IndexedDB in Node. Each block installs a small Map-backed fake as
+// globalThis.localStorage for its own duration only, and restores whatever
+// was there before (nothing, in plain Node) in a finally.
+function fakeLocalStorage() {
+  const m = new Map();
+  return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, v), removeItem: (k) => m.delete(k) };
+}
+function withFakeLocalStorage(ls, fn) {
+  const hadLs = Object.prototype.hasOwnProperty.call(globalThis, 'localStorage');
+  const priorLs = globalThis.localStorage;
+  globalThis.localStorage = ls;
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      if (hadLs) globalThis.localStorage = priorLs;
+      else delete globalThis.localStorage;
+    });
+}
+function durableMemoryBackend() {
+  return { ...memoryBackend(), persistent: true };
+}
+
+await withFakeLocalStorage(fakeLocalStorage(), async () => {
+  // PS4a: a legacy save AND a legacy preset both import on first backend
+  // resolution, become visible through the normal read API, and the legacy
+  // blobs are cleared afterward (clearing IS the "migration done" marker —
+  // there is no separate marker key).
+  const ps4aSample = buildSampleWorld();
+  const ps4aLegacySaveData = serializeWorld(ps4aSample.world);
+  globalThis.localStorage.setItem(
+    'alfw:saves:v1',
+    JSON.stringify({
+      'Legacy Run': { name: 'Legacy Run', savedAt: '2024-01-01T00:00:00.000Z', meta: { player: 'Old Hero' }, data: ps4aLegacySaveData },
+    })
+  );
+  globalThis.localStorage.setItem(
+    'alfw:presets:v1',
+    JSON.stringify({ 'Legacy Preset': { worldName: 'Legacy World', rngSeed: 7 } })
+  );
+
+  const ps4a = createPersistence(durableMemoryBackend);
+  const ps4aSaves = await ps4a.listSaves();
+  assert.equal(ps4aSaves.length, 1, 'the legacy save is imported and visible via listSaves on first backend resolution');
+  assert.equal(ps4aSaves[0].name, 'Legacy Run', 'the imported save keeps its legacy name');
+  assert.deepEqual(ps4aSaves[0].meta, { player: 'Old Hero' }, 'the imported save keeps its legacy meta');
+  const ps4aLoaded = await ps4a.loadSave('Legacy Run');
+  assert.deepEqual(ps4aLoaded, parseSave(ps4aLegacySaveData), 'the imported save data round-trips exactly as the legacy blob held it');
+  const ps4aPresets = await ps4a.listPresets();
+  assert.deepEqual(ps4aPresets, [{ name: 'Legacy Preset' }], 'the legacy preset is imported and visible via listPresets');
+  const ps4aPreset = await ps4a.getPreset('Legacy Preset');
+  assert.deepEqual(ps4aPreset, { worldName: 'Legacy World', rngSeed: 7 }, 'the imported preset config round-trips exactly');
+  assert.equal(globalThis.localStorage.getItem('alfw:saves:v1'), null, 'the legacy saves blob is cleared from localStorage once fully imported');
+  assert.equal(globalThis.localStorage.getItem('alfw:presets:v1'), null, 'the legacy presets blob is cleared from localStorage once fully imported');
+  console.log('PS4a PASSED: a legacy save and preset from localStorage are imported into the new per-record layout on first resolution, and the legacy blobs are cleared afterward');
+});
+
+await withFakeLocalStorage(fakeLocalStorage(), async () => {
+  // PS4b: never-clobber — a save that already exists in the (durable)
+  // backend under a name a legacy entry also uses must survive untouched;
+  // the newer, already-migrated/created record always wins over an older
+  // legacy duplicate. The legacy blob is still cleared afterward (its
+  // superseded entry is intentionally discarded, not an import failure).
+  const ps4bBackend = durableMemoryBackend();
+  const ps4bNewerSample = buildSampleWorld();
+  ps4bNewerSample.world.dispatch('CLOCK_JUMP', { gameSecondsElapsed: 100 });
+  const ps4bNewerData = serializeWorld(ps4bNewerSample.world);
+  await ps4bBackend.setItem(
+    'save-meta:Shared Name',
+    JSON.stringify({ name: 'Shared Name', savedAt: '2025-01-01T00:00:00.000Z', meta: { player: 'New Hero' } })
+  );
+  await ps4bBackend.setItem('save-data:Shared Name', ps4bNewerData);
+
+  const ps4bLegacySample = buildSampleWorld(); // deliberately undispatched — diverges from ps4bNewerSample
+  globalThis.localStorage.setItem(
+    'alfw:saves:v1',
+    JSON.stringify({
+      'Shared Name': { name: 'Shared Name', savedAt: '2020-01-01T00:00:00.000Z', meta: { player: 'Old Hero' }, data: serializeWorld(ps4bLegacySample.world) },
+    })
+  );
+
+  const ps4b = createPersistence(ps4bBackend);
+  const ps4bLoaded = await ps4b.loadSave('Shared Name');
+  assert.deepEqual(ps4bLoaded, parseSave(ps4bNewerData), 'a pre-existing backend record is never clobbered by an older legacy entry of the same name');
+  const ps4bList = await ps4b.listSaves();
+  assert.equal(ps4bList.find((s) => s.name === 'Shared Name').meta.player, 'New Hero', 'the pre-existing record\'s meta also survives untouched');
+  assert.equal(globalThis.localStorage.getItem('alfw:saves:v1'), null, 'the legacy blob is still cleared even though its one entry was skipped as superseded');
+  console.log('PS4b PASSED: migration never overwrites a save/preset that already exists under the same name — a post-migration record always wins over an older legacy duplicate');
+});
+
+await withFakeLocalStorage(fakeLocalStorage(), async () => {
+  // PS4c: a corrupt legacy blob is left in place (not cleared) rather than
+  // silently discarded, and never crashes migration or any persistence call.
+  globalThis.localStorage.setItem('alfw:saves:v1', 'not valid json {{{');
+  const ps4c = createPersistence(durableMemoryBackend);
+  const ps4cSaves = await ps4c.listSaves();
+  assert.deepEqual(ps4cSaves, [], 'a corrupt legacy blob imports nothing rather than crashing or partially importing garbage');
+  assert.equal(globalThis.localStorage.getItem('alfw:saves:v1'), 'not valid json {{{', 'a corrupt legacy blob is left untouched in localStorage rather than being cleared, so it is never silently discarded and will retry next boot');
+  console.log('PS4c PASSED: a corrupt legacy blob is left in place untouched, and does not crash migration or any subsequent persistence call');
+});
+
+console.log('\nSection PS PASSED: game/persistence.js\'s async storage-adapter layer (over memoryBackend, the same fallback the browser uses when IndexedDB is unavailable) round-trips a real world exactly, does not truncate a large event log, serializes concurrent writes so an async race can never silently drop or splice a save, and one-time imports a player\'s pre-existing legacy localStorage saves/presets into the new layout without ever clobbering newer data or losing a corrupt blob — see the file\'s own header comment for the manual browser checklist covering the real indexedDbBackend() path');
 
 // --- Section DP: dispatch entry-point guards (undefined-payload guard +
 // transactional dispatchBatch) -----------------------------------------------
